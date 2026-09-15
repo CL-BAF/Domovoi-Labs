@@ -16,7 +16,8 @@ def _base_dict():
         },
         "dataset": {"name": "smoke", "train_fraction": 0.9},
         "training": {"steps": 3, "batch_size": 2, "context_length": 32,
-                     "precision": "fp32", "learning_rate": 1e-3},
+                     "precision": "fp32", "learning_rate": 1e-3,
+                     "warmup_steps": 1},
         "output": {"experiments_dir": "experiments"},
     }
 
@@ -44,12 +45,20 @@ def test_unknown_key_rejected():
 @pytest.mark.parametrize("field,value,pat", [
     ("d_model", 33, "divisible"),          # 33 % 2 != 0
     ("vocab_size", 128, "256"),
-    ("context_length", 9999, "context_length"),
+    ("dropout", 1.5, "dropout"),
 ])
 def test_model_validation(field, value, pat):
     d = _base_dict()
     d["model"][field] = value
     with pytest.raises(ConfigError, match=pat):
+        config_from_dict(d)
+
+
+def test_training_context_exceeds_model_context():
+    d = _base_dict()
+    d["model"]["context_length"] = 32
+    d["training"]["context_length"] = 64
+    with pytest.raises(ConfigError, match="context_length"):
         config_from_dict(d)
 
 

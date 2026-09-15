@@ -49,7 +49,17 @@ def save_checkpoint(
     tmp_dir = ckpt_dir.parent / (ckpt_dir.name + ".tmp")
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    state = {k: v.detach().cpu().contiguous() for k, v in model.state_dict().items()}
+    # safetensors refuses tensors that share storage (e.g. tied
+    # lm_head.weight == wte.weight).  Keep the first key of each storage
+    # alias; load_state_dict(strict=False) restores the tie via the shared
+    # Parameter object.
+    state, seen_ptrs = {}, set()
+    for k, v in model.state_dict().items():
+        ptr = v.data_ptr()
+        if ptr in seen_ptrs:
+            continue
+        seen_ptrs.add(ptr)
+        state[k] = v.detach().cpu().contiguous()
     save_file(state, str(tmp_dir / "model.safetensors"))
     torch.save(optimizer.state_dict(), tmp_dir / "optimizer.pt")
     torch.save(scheduler.state_dict(), tmp_dir / "scheduler.pt")

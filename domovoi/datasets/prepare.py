@@ -104,7 +104,9 @@ def prepare_dataset(
     if source_url == "synthetic":
         raw_path = processed_dir / "raw.txt"
         if not raw_path.exists():
-            make_smoke_corpus(processed_dir)
+            corpus = make_smoke_corpus(processed_dir)
+            raw_path.write_text(corpus.read_text(encoding="utf-8"),
+                                encoding="utf-8")
     else:
         raw_path = DATA_ROOT / "raw" / f"{name}.txt"
         raw_path.parent.mkdir(parents=True, exist_ok=True)

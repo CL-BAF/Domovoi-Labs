@@ -172,11 +172,14 @@ class Config:
         return clean(self)
 
     def save_copy(self, path: str | pathlib.Path) -> None:
-        """Write the *original* YAML (not the parsed form) into the experiment
-        directory so the run can be reproduced exactly."""
-        if self.source_path is None:
-            raise ConfigError("Config has no source file to copy.")
-        pathlib.Path(path).write_text(pathlib.Path(self.source_path).read_text(encoding="utf-8"), encoding="utf-8")
+        """Write the config into the experiment directory so the run can be
+        reproduced exactly: the original YAML verbatim when the config was
+        loaded from a file, otherwise a dump of the parsed values."""
+        if self.source_path is not None:
+            text = pathlib.Path(self.source_path).read_text(encoding="utf-8")
+        else:
+            text = yaml.safe_dump(self.to_dict(), sort_keys=False)
+        pathlib.Path(path).write_text(text, encoding="utf-8")
 
 
 # ----------------------------------------------------------------------
@@ -229,6 +232,9 @@ def config_from_dict(raw: dict) -> Config:
     """Build a Config from an already-parsed dict (e.g. stored in
     metadata.json).  Reuses load_config's validation by round-tripping
     through the same section builder."""
+    for section in ("experiment", "model", "dataset", "training", "output"):
+        if section not in raw:
+            raise ConfigError(f"Config is missing section '{section}'.")
     cfg = Config(
         experiment=_section("experiment", raw["experiment"], ExperimentSection, ["name"]),
         model=_section("model", raw["model"], ModelSection, ["architecture"]),

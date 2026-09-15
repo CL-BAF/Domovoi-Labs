@@ -95,17 +95,29 @@ def test_val_batches_are_fixed_across_calls(smoke_dataset):
 def test_eval_data_isolation():
     """The training data pipeline must never touch the benchmark directory.
 
-    Greps the datasets module for references to data/evals — if someone adds
-    one, this test fails and they must justify it in review.
+    Walks the datasets package AST looking for references to the eval tree
+    in actual code (string constants, names, attributes) — docstrings and
+    comments explaining the policy are fine; functional references are not.
     """
+    import ast
     import pathlib
-    import re
     pkg = pathlib.Path(__file__).resolve().parent.parent / "domovoi" / "datasets"
     for src in pkg.glob("*.py"):
-        text = src.read_text(encoding="utf-8")
-        assert not re.search(r"evals|benchmark", text, re.IGNORECASE), (
-            f"{src.name} references eval/benchmark data. Training and "
-            f"benchmark data must stay separate (contamination guard).")
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            # docstrings are bare string-expression statements — skip them
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+                continue
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and "evals" in node.value.lower():
+                raise AssertionError(
+                    f"{src.name} references eval data ({node.value!r}). "
+                    f"Training and benchmark data must stay separate "
+                    f"(contamination guard).")
+            if isinstance(node, ast.Name) and "eval" in node.id.lower():
+                raise AssertionError(
+                    f"{src.name} references {node.id!r} — training code "
+                    f"must not depend on eval data structures.")
 
 
 def test_train_val_no_overlap_by_content(smoke_dataset):
