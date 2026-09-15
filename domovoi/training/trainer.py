@@ -183,6 +183,9 @@ class Trainer:
         status INTERRUPTED."""
         t = self.config.training
         started = time.time()
+        # tokens trained in THIS session (tokens_seen is cumulative across
+        # resumes; wall clock is not, so throughput must compare like with like)
+        session_start_tokens = self.tokens_seen
         self.model.train()
         log_start_time = time.time()
         log_start_tokens = self.tokens_seen
@@ -193,7 +196,6 @@ class Trainer:
 
         try:
             for step in range(self.start_step, t.steps):
-                last_step = step + 1
                 lr = current_lr(self.optimizer)
 
                 # -- gradient accumulation ---------------------------------
@@ -260,6 +262,11 @@ class Trainer:
                 if (step + 1) % t.checkpoint_interval == 0:
                     self._save_checkpoint(step + 1)
 
+                # the step is now fully complete; only now may the rescue
+                # checkpoint reference it (set at the top would let an
+                # interrupt mid-step save a step that never ran)
+                last_step = step + 1
+
         except KeyboardInterrupt:
             print("\n[trainer] Interrupted — saving rescue checkpoint.", flush=True)
             status = "INTERRUPTED"
@@ -281,7 +288,8 @@ class Trainer:
             "final_val_loss": final["val_loss"],
             "final_val_ppl": final["val_ppl"],
             "wall_clock_s": round(wall, 1),
-            "avg_tok_per_s": round(self.tokens_seen / max(1e-9, wall), 1),
+            "avg_tok_per_s": round(
+                (self.tokens_seen - session_start_tokens) / max(1e-9, wall), 1),
             "params_total": self.n_params,
             "params_non_embedding": self.n_params_non_embedding,
             "active_params_per_token": self.n_params,  # dense model: active == total

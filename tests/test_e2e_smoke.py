@@ -21,16 +21,8 @@ from domovoi.config import config_from_dict
 from domovoi.datasets import prepare_dataset
 from domovoi.experiments import create_experiment, generate_report, set_status, update_metadata
 from domovoi.inference import generate
-from domovoi.evals import MultipleChoiceEval, build_task
+from domovoi.evals import (MultipleChoiceEval, build_task, run_evals)
 from domovoi.training import Trainer, build_model_from_checkpoint
-
-
-class _ByteTok:
-    vocab_size = 512
-    def encode(self, text):
-        return [b for b in text.encode("utf-8")]
-    def decode(self, ids):
-        return bytes(ids).decode("utf-8", errors="replace")
 
 
 def test_end_to_end_smoke(smoke_dataset, tmp_path):
@@ -91,7 +83,6 @@ def test_end_to_end_smoke(smoke_dataset, tmp_path):
                                              encoding="utf-8")
 
     # ---------- 7. tiny evaluation ---------------------------------------
-    from domovoi.evals import run_evals
     val_ppl = build_task("val_ppl").run(
         trainer_r.model, trainer_r.tokenizer, torch.device("cpu"),
         training_config=cfg, n_batches=2)
