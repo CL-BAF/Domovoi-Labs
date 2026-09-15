@@ -37,9 +37,11 @@ def test_verify_vocab(tmp_path):
     corpus.write_text("a b c " * 100, encoding="utf-8")
     meta = train_byte_bpe([corpus], vocab_size=300, out_path=tmp_path / "tok.json")
     tok = DomovoiTokenizer(meta["path"])
-    verify_vocab(tok, 300)
+    # The trained vocab can be smaller than the requested 300; verify against
+    # the actual size recorded in the metadata.
+    verify_vocab(tok, meta["vocab_size"])
     with pytest.raises(RuntimeError):
-        verify_vocab(tok, 301)
+        verify_vocab(tok, meta["vocab_size"] + 1)
 
 
 def test_split_deterministic():

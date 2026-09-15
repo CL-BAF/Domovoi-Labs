@@ -44,6 +44,16 @@ def main() -> int:
     print(f"[prepare] val tokens  : {meta['tokens']['val']:,}")
     print(f"[prepare] vocab size  : {meta['tokens']['vocab_size']}")
     print(f"[prepare] tokenizer  : {meta['tokenizer']['path']}")
+    actual = meta["tokens"]["vocab_size"]
+    if actual != cfg.model.vocab_size:
+        # The BPE trainer stops early when the corpus runs out of merge
+        # candidates.  Training would fail at verify_vocab; fail here with
+        # an actionable message instead.
+        print(f"[prepare] ERROR: trained vocab ({actual}) != config "
+              f"model.vocab_size ({cfg.model.vocab_size}). "
+              f"Update model.vocab_size in {args.config} to {actual} "
+              f"and re-run.")
+        return 1
     print("[prepare] done")
     return 0
 

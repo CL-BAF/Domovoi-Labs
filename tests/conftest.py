@@ -75,7 +75,6 @@ def smoke_dataset(tmp_path, tiny_model_cfg_dict):
     processed_dir = tmp_path / "data" / "processed" / "smoke"
     tok_path = tmp_path / "data" / "tokenizers" / "smoke_bpe.json"
     cfg_dict = dict(tiny_model_cfg_dict)
-    cfg_dict["model"]["vocab_size"] = 300
     cfg_dict["dataset"]["processed_dir"] = str(processed_dir)
     cfg_dict["tokenizer"]["path"] = str(tok_path)
     meta = prepare_dataset(
@@ -83,4 +82,8 @@ def smoke_dataset(tmp_path, tiny_model_cfg_dict):
         train_fraction=0.9, processed_dir=processed_dir,
         tokenizer_path=tok_path, vocab_size=300,
     )
+    # The trained vocab can be smaller than the requested 300 (tiny corpus
+    # runs out of merge candidates).  The model must be built with the
+    # actual size or verify_vocab in the Trainer fails.
+    cfg_dict["model"]["vocab_size"] = meta["tokens"]["vocab_size"]
     return {"meta": meta, "config_dict": cfg_dict, "tmp_path": tmp_path}

@@ -16,7 +16,7 @@ import hashlib
 import pathlib
 from typing import Iterable
 
-from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 TOKENIZER_VERSION = "byte-bpe-v1"
 
@@ -44,6 +44,8 @@ def train_byte_bpe(
     # ByteLevel pre-tokenizer: every input is representable (byte fallback),
     # no <unk> needed, and decode(encode(x)) == x always holds.
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)
+    # Without the matching decoder, decode(encode(x)) != x for non-ASCII text.
+    tok.decoder = decoders.ByteLevel()
     trainer = trainers.BpeTrainer(
         vocab_size=vocab_size,
         initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
@@ -53,6 +55,10 @@ def train_byte_bpe(
     out_path = pathlib.Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tok.save(str(out_path))
+    # NOTE: the trained vocab can be SMALLER than requested when the corpus
+    # runs out of merge candidates.  Callers must use the returned
+    # `vocab_size` (the actual one) for the model config; the Trainer's
+    # verify_vocab enforces model/tokenizer agreement at run time.
     return {
         "path": str(out_path),
         "sha256": sha256_file(out_path),
