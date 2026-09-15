@@ -15,7 +15,7 @@ Nothing is marked complete until it has actually been run and tested.
 - ✅ Config schema (YAML, validated, typed) — `configs/*.yaml`
 - ✅ pyproject.toml with pinned dependency set
 - ✅ .gitignore (data, checkpoints, artifacts excluded; experiment metadata kept)
-- ⬜ README with full setup + usage instructions
+- ✅ README with full setup + usage instructions
 
 ## M0.2 — Baseline model ⬜
 
@@ -24,8 +24,8 @@ Nothing is marked complete until it has actually been run and tested.
 - ✅ Causal masking via F.scaled_dot_product_attention
 - ✅ KV cache for incremental decoding
 - ✅ Tied embedding option
-- ⬜ Forward/masking tests passing on CPU
-- ⬜ Parameter count verified against breakdown
+- ✅ Forward/masking tests passing on CPU
+- ✅ Parameter count verified against breakdown
 
 ## M0.3 — Training pipeline ⬜
 
@@ -35,8 +35,9 @@ Nothing is marked complete until it has actually been run and tested.
 - ✅ CheckpointManager (step_XXXXXXXX + latest.json)
 - ✅ Metrics: train loss, val loss, tokens, tok/s, lr → JSONL
 - ✅ CPU fallback; clean failure messages
-- ⬜ Training tests passing (save/load/resume bit-exact)
-- ⬜ First real run on CUDA (RTX 2050, 4 GiB) recorded as an experiment
+- ✅ Training tests passing (save/load/resume bit-exact, crash + rescue
+  mid-step interrupt replay the uninterrupted trajectory exactly)
+- 🔄 First real run on CUDA (RTX 2050, 4 GiB) recorded as DML-0001
 
 ## M0.4 — Data pipeline ⬜
 
@@ -45,8 +46,10 @@ Nothing is marked complete until it has actually been run and tested.
 - ✅ Packed uint16 token binaries, memory-mapped batch loader
 - ✅ Synthetic smoke corpus (no network needed for tests)
 - ✅ Contamination guard: eval data tree fully separate from training data
-- ⬜ tinyshakespeare prepared and hashed
-- ⬜ Data tests passing
+  (AST-enforced by tests)
+- ✅ tinyshakespeare prepared and hashed (307,607 train / 38,425 val
+  tokens, vocab 4096)
+- ✅ Data tests passing
 
 ## M0.5 — Inference ⬜
 
@@ -55,7 +58,8 @@ Nothing is marked complete until it has actually been run and tested.
 - ✅ KV-cache incremental decode
 - ✅ TTFT, prefill tok/s, decode tok/s measured (not estimated)
 - ✅ Generation script (scripts/generate.py)
-- ⬜ Generation tests passing
+- ✅ Generation tests passing (context-window invariant: prompt + new
+  tokens never exceed the window)
 
 ## M0.6 — Profiling ⬜
 
@@ -64,7 +68,7 @@ Nothing is marked complete until it has actually been run and tested.
 - ✅ Real CUDA max-memory-allocated/reserved statistics
 - ✅ Prefill/decode/TTFT medians; VRAM-vs-context sweep
 - ✅ CPU runs report null VRAM explicitly (never fabricated)
-- ⬜ Profiling tests passing
+- ✅ Profiling tests passing
 - ⬜ Baseline profile recorded into experiment DML-0001
 
 ## M0.7 — Evaluations ⬜
@@ -77,7 +81,7 @@ Nothing is marked complete until it has actually been run and tested.
 - ✅ Benchmark download/normalization script with version pinning
 - ✅ Milestone-eval slots reserved (MMLU-Pro, GPQA, MATH-500, LCB, IFBench,
   RULER)
-- ⬜ Eval tests passing (synthetic, no network)
+- ✅ Eval tests passing (synthetic, no network)
 - ⬜ Real benchmark data downloaded; first eval results recorded
 
 ## M0.8 — Experiment tracking ⬜
@@ -90,22 +94,23 @@ Nothing is marked complete until it has actually been run and tested.
 - ✅ Failed experiments never deleted
 - ✅ Human-readable reports generated only from stored artifacts
 - ✅ Scoreboard aggregation (results/scoreboard.md)
-- ⬜ Registry/report tests passing
+- ✅ Registry/report tests passing
 
-## M0.9 — End-to-end validation ⬜
+## M0.9 — End-to-end validation 🔄
 
-- ⬜ CPU smoke test (data → train → checkpoint → resume → generate →
+- ✅ CPU smoke test (data → train → checkpoint → resume → generate →
   eval → experiment → report) passing
-- ⬜ Real run: prepare tinyshakespeare → train baseline on CUDA →
-  evaluate → profile → report as DML-0001
-- ⬜ Three review passes (correctness, research integrity, code quality)
+- 🔄 Real run: prepare tinyshakespeare → train baseline on CUDA →
+  evaluate → profile → report as DML-0001 (training in progress)
+- 🔄 Three review passes (correctness, research integrity, code quality)
+  running as an adversarial verification workflow
 
-## M0.10 — Documentation and cleanup ⬜
+## M0.10 — Documentation and cleanup 🔄
 
-- ⬜ README complete (setup, commands, structure)
-- ⬜ HANDOFF.md current
-- ⬜ docs/ pipeline overview
-- ⬜ Full test suite green
+- ✅ README complete (setup, commands, structure)
+- 🔄 HANDOFF.md current
+- ✅ docs/ pipeline overview
+- ✅ Full test suite green (65 tests, CPU + CUDA-verified model code)
 
 ## M1 — Architecture research begins ⬜
 
@@ -119,3 +124,9 @@ conditions. Candidate directions live in RESEARCH.md §2.
 
 - 2026-09-15: Initial roadmap drafted during M0 implementation. Milestones
   flip to ✅ only after their tests actually pass.
+- 2026-09-15: Full test suite green with torch 2.11.0+cu128 on the RTX
+  2050 (65 tests). Executing the suite surfaced and fixed real bugs:
+  rng.pt never restored on resume, CheckpointManager dropping `step`,
+  generate() emitting a token beyond the context window, GSM8K number
+  regex keeping trailing periods, trainer ModelOutput unpacking.
+  DML-0001 real training run started.

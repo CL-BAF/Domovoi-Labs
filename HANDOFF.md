@@ -3,10 +3,13 @@
 ## Current state
 
 Building milestone **M0: the research laboratory** (pipeline before
-architecture research). All core modules are written and the dependency
-install (PyTorch CUDA) was in progress at the time of this snapshot. Tests
-and the first real end-to-end run are the immediate next work. This file
-is updated after every major milestone — do not let it go stale.
+architecture research). All core modules are written, the full test
+suite is GREEN (65 tests, torch 2.11.0+cu128, CUDA verified on the
+RTX 2050), and the first real training run (DML-0001, baseline ~41M
+Transformer on tinyshakespeare) is executing on the GPU. The three
+review passes are running as an adversarial verification workflow.
+This file is updated after every major milestone — do not let it go
+stale.
 
 ## Current Git commit
 
@@ -48,22 +51,37 @@ commit on main as the source of truth.)
 
 ## Active work
 
-- PyTorch (cu128) install for the RTX 2050 4 GiB machine
-- Running the full test suite; fixing failures
-- First real end-to-end run → experiment DML-0001
+- DML-0001 training in progress (3000 steps, ~17.5k tok/s, expected
+  wall ~25 min); afterwards: download eval data, evaluate, profile,
+  report, scoreboard
+- Three-pass review workflow running (correctness / research
+  integrity / code quality, each finding adversarially verified)
 
 ## Known issues
 
-- Nothing verified by execution yet at the time of this snapshot — tests
-  exist but torch was still installing. Do not trust any "works" claim
-  until the test suite is green.
 - `scripts/download_eval_data.py` requires the optional `datasets` package
   (`pip install -e ".[evals]"`) and network access; core tests never touch
-  the network.
+  the network. (Install was in flight at snapshot time.)
+- Resuming with a *different* `training.steps` than the checkpointed run
+  deliberately changes the LR-schedule horizon; the trainer now prints a
+  loud warning — such a continuation is NOT comparable to an uninterrupted
+  run and the tests pin the horizon.
 
 ## Failed approaches
 
-(none yet)
+- First torch cu128 install attempt died mid-download (flaky DNS +
+  a Windows file lock at ~1.8/2.75 GB). Fixed with pip
+  `--timeout 90 --retries 20` in a background shell.
+- Executing the suite exposed that several "written" paths had never
+  actually run: `load_checkpoint(restore_rng=False)` returned a dummy
+  dict so the data-generator state was NEVER restored on resume;
+  `CheckpointManager.save` dropped `step`; `generate()` could emit a
+  token at position ctx_len (outside the window); the GSM8K number
+  regex kept trailing periods (`'7.'` vs `'7'`); the Trainer unpacked a
+  3-field ModelOutput into 2. All fixed with regression tests.
+- A test scenario that "resumed" a 3-step run into a 6-step schedule
+  was wrong by construction — bit-exact resume only holds for the same
+  schedule horizon. The test now simulates a mid-run crash instead.
 
 ## Important design decisions
 
@@ -141,7 +159,11 @@ python -m pytest tests/ -v          # all tests, CPU, no network
 
 ## Latest experiment
 
-None recorded yet (DML-0001 pending first successful run).
+DML-0001 (baseline_small_v1) — training in progress at snapshot time.
+See `experiments/DML-0001/` once complete: metadata.json, summary.json,
+metrics.jsonl, val_metrics.jsonl, evals.json, profile.json, report.md.
+Will hold real measured numbers only — nothing in this file or the
+report is ever estimated.
 
 ## Latest benchmark results
 
@@ -156,15 +178,15 @@ None yet. Do not invent any.
 
 ## Immediate next steps
 
-1. Finish torch install; run `python -m pytest tests/ -v` and fix failures.
-2. `python scripts/prepare_data.py --config configs/baseline_small.yaml`.
-3. Train baseline (configs/baseline_small.yaml) → DML-0001.
-4. `python scripts/download_eval_data.py --tasks all --limit 500`
+1. Wait for DML-0001 training to finish (~step 3000).
+2. `python scripts/download_eval_data.py --tasks all --limit 500`
    (network permitting), then `python scripts/evaluate.py --experiment DML-0001`.
-5. `python scripts/profile_model.py --experiment DML-0001`.
-6. `python scripts/make_report.py --experiment DML-0001`.
-7. Three review passes (correctness / research integrity / code quality).
-8. Update ROADMAP.md checkboxes and this file; commit.
+3. `python scripts/profile_model.py --experiment DML-0001`.
+4. `python scripts/make_report.py --experiment DML-0001` and
+   `python scripts/scoreboard.py`.
+5. Triage the three-pass review findings; fix the confirmed ones and
+   re-run the full test suite.
+6. Update ROADMAP.md checkboxes and this file; commit.
 
 ## Longer-term next steps
 
