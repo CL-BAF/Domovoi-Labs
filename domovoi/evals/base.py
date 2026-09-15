@@ -177,9 +177,11 @@ def build_task(name: str):
 def run_evals(
     model, tokenizer, device, tasks: list[str], limit: Optional[int] = None,
     training_config=None, data_root: pathlib.Path = EVAL_DATA_ROOT,
-    n_val_batches: int = 50,
+    n_val_batches: Optional[int] = None,
 ) -> dict:
-    """Run a set of eval tasks; returns machine-readable results dict."""
+    """Run a set of eval tasks; returns machine-readable results dict.
+    n_val_batches=None lets val_ppl default to the training config's
+    eval_batches (directly comparable with training-time validation)."""
     results = {}
     for name in tasks:
         task = build_task(name)

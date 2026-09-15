@@ -37,7 +37,11 @@ Nothing is marked complete until it has actually been run and tested.
 - ✅ CPU fallback; clean failure messages
 - ✅ Training tests passing (save/load/resume bit-exact, crash + rescue
   mid-step interrupt replay the uninterrupted trajectory exactly)
-- 🔄 First real run on CUDA (RTX 2050, 4 GiB) recorded as DML-0001
+- 🔄 First real run on CUDA (RTX 2050, 4 GiB) recorded as DML-0001 —
+  STOPPED at the operator's request at ~step 520/3000 (loss 7.4→3.4,
+  val ppl ~104 at step 500). No further local GPU training will run
+  without explicit operator approval; completing the run (CPU-only finish,
+  cloud GPU, or abandoning it) is the operator's decision.
 
 ## M0.4 — Data pipeline ⬜
 
@@ -100,17 +104,22 @@ Nothing is marked complete until it has actually been run and tested.
 
 - ✅ CPU smoke test (data → train → checkpoint → resume → generate →
   eval → experiment → report) passing
-- 🔄 Real run: prepare tinyshakespeare → train baseline on CUDA →
-  evaluate → profile → report as DML-0001 (training in progress)
-- 🔄 Three review passes (correctness, research integrity, code quality)
-  running as an adversarial verification workflow
+- ⛔ Real run (DML-0001): training halted at the operator's request
+  (~step 520/3000 on the laptop GPU). Registry status write was also
+  declined by the operator — DML-0001's recorded status awaits their
+  decision. Remaining: finish or abandon the run, download eval data,
+  evaluate, profile, report.
+- ✅ Three review passes (correctness, research integrity, code quality)
+  run as an adversarial verification workflow: 10 confirmed findings
+  (3 high / 6 medium / 1 low), all fixed with regression tests;
+  deferred findings triaged (see HANDOFF)
 
 ## M0.10 — Documentation and cleanup 🔄
 
 - ✅ README complete (setup, commands, structure)
 - 🔄 HANDOFF.md current
 - ✅ docs/ pipeline overview
-- ✅ Full test suite green (65 tests, CPU + CUDA-verified model code)
+- ✅ Full test suite green (75 tests, CPU + CUDA-verified model code)
 
 ## M1 — Architecture research begins ⬜
 
@@ -130,3 +139,13 @@ conditions. Candidate directions live in RESEARCH.md §2.
   generate() emitting a token beyond the context window, GSM8K number
   regex keeping trailing periods, trainer ModelOutput unpacking.
   DML-0001 real training run started.
+- 2026-09-15: Operator halted the DML-0001 GPU run (~step 520/3000) and
+  declined further local GPU training / eval downloads / registry writes
+  without approval. Three-pass adversarial review completed: 10 confirmed
+  findings, all fixed (rescue-checkpoint double-apply window during
+  validation [high], prepare-cache config drift [high, 2 findings], eval
+  tokenizer-hash verification [high], GradScaler not checkpointed,
+  decode-throughput inflation, summary clobber on zero-progress resume,
+  val_ppl agreement claims, batch-loader off-by-one) — suite now 75 tests
+  green, CPU-only. Known remaining (deferred, low): no staleness
+  heartbeat for processes killed without a Python exception.

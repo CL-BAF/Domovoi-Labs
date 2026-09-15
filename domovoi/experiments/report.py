@@ -64,6 +64,18 @@ def _compare(result: dict, baseline: dict) -> list[str]:
     r_eval = result.get("evals", {}).get("tasks", {}) or {}
     b_eval = baseline.get("evals", {}).get("tasks", {}) or {}
     for task in sorted(set(r_eval) & set(b_eval)):
+        # a --limit subset run is NOT like-for-like with a full run; say so
+        # instead of letting the delta read as a real effect
+        r_size = (r_eval[task].get("n"), r_eval[task].get("n_batches"),
+                  r_eval[task].get("limit"))
+        b_size = (b_eval[task].get("n"), b_eval[task].get("n_batches"),
+                  b_eval[task].get("limit"))
+        if r_size != b_size:
+            lines.append(
+                f"  ⚠ {task}: eval scopes differ "
+                f"(n={r_size[0] or r_size[1]} limit={r_size[2]} vs "
+                f"n={b_size[0] or b_size[1]} limit={b_size[2]}) — the deltas "
+                f"below are NOT like-for-like")
         for metric in ("acc_norm", "acc", "val_loss"):
             if metric in r_eval[task] and metric in b_eval[task]:
                 a, b = r_eval[task][metric], b_eval[task][metric]

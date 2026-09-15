@@ -7,7 +7,10 @@ top-k and top-p sampling.
 
 Speed measurement: prefill (first forward over the prompt) and decode (the
 per-token loop) are timed separately, so time-to-first-token, prefill tok/s
-and decode tok/s are all real measurements, never estimates.
+and decode tok/s are all real measurements, never estimates.  The first new
+token is sampled from the prefill logits, so it is NOT counted in
+decode_tok_per_s — that number covers exactly the forwards that were timed
+(and is null when the decode loop never ran, rather than fabricating one).
 """
 
 from __future__ import annotations
@@ -80,9 +83,12 @@ def generate(
         new_text       - only the generated part
         n_prompt_tokens, n_new_tokens
         ttft_s         - time to first token (prefill forward)
-        prefill_tok_per_s, decode_tok_per_s
-        total_tok_per_s
+        prefill_tok_per_s, decode_tok_per_s  (decode_tok_per_s is None when
+        the decode loop produced no tokens, e.g. max_new_tokens <= 1)
+        decode_s       - seconds spent in the decode loop
     """
+    if max_new_tokens < 0:
+        raise ValueError(f"max_new_tokens must be >= 0; got {max_new_tokens}")
     if seed is not None:
         set_seed(seed)
     device = device or next(model.parameters()).device
@@ -119,7 +125,8 @@ def generate(
     #   prefill sample (position n_prompt) needs n_prompt < ctx_len, and
     #   each decode sample needs cache_len + 2 <= ctx_len.
     new_ids = []
-    if len(prompt_ids) < ctx_len:
+    decode_ids = []   # tokens sampled INSIDE the timed decode loop
+    if max_new_tokens >= 1 and len(prompt_ids) < ctx_len:
         next_tok = _sample_next(out.logits[0, -1], temperature, top_k, top_p, gen)
         new_ids.append(next_tok)
 
@@ -133,9 +140,11 @@ def generate(
         caches = out.caches
         next_tok = _sample_next(out.logits[0, -1], temperature, top_k, top_p, gen)
         new_ids.append(next_tok)
+        decode_ids.append(next_tok)
     decode_s = time.perf_counter() - t1
 
     n_new = len(new_ids)
+    n_decode = len(decode_ids)
     result = {
         "prompt": prompt,
         "text": prompt + tokenizer.decode(new_ids),
@@ -144,7 +153,10 @@ def generate(
         "n_new_tokens": n_new,
         "ttft_s": round(ttft, 6),
         "prefill_tok_per_s": round(len(prompt_ids) / max(1e-9, ttft), 1),
-        "decode_tok_per_s": round(n_new / max(1e-9, decode_s), 1) if n_new else None,
+        # decode throughput covers exactly the timed decode-loop tokens;
+        # the prefill-sampled first token belongs to the prefill measurement
+        "decode_tok_per_s": round(n_decode / max(1e-9, decode_s), 1)
+            if n_decode else None,
         "decode_s": round(decode_s, 6),
         "settings": {
             "temperature": temperature, "top_k": top_k, "top_p": top_p,

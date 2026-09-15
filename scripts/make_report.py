@@ -21,7 +21,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from domovoi.experiments import generate_report, load_metadata, update_metadata
-from domovoi.experiments.registry import load_metadata as _load  # noqa: F401
 
 
 def main() -> int:

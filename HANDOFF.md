@@ -4,10 +4,18 @@
 
 Building milestone **M0: the research laboratory** (pipeline before
 architecture research). All core modules are written, the full test
-suite is GREEN (65 tests, torch 2.11.0+cu128, CUDA verified on the
-RTX 2050), and the first real training run (DML-0001, baseline ~41M
-Transformer on tinyshakespeare) is executing on the GPU. The three
-review passes are running as an adversarial verification workflow.
+suite is GREEN (75 tests, torch 2.11.0+cu128, CUDA verified on the
+RTX 2050), and the three-pass adversarial review (correctness /
+research integrity / code quality, findings verified by refuters)
+completed with all 10 confirmed findings fixed and covered by
+regression tests.
+
+**The DML-0001 GPU run was STOPPED at the operator's request** at
+~step 520/3000 (loss 7.4→3.4, val ppl ~104 at step 500). The operator
+has directed that NO further local GPU training, eval-data downloads,
+or experiment-registry status writes run without explicit approval.
+Completing M0's "real run" step (CPU-only finish / cloud GPU / abandon)
+is the operator's decision — see Immediate next steps.
 This file is updated after every major milestone — do not let it go
 stale.
 
@@ -51,21 +59,66 @@ commit on main as the source of truth.)
 
 ## Active work
 
-- DML-0001 training in progress (3000 steps, ~17.5k tok/s, expected
-  wall ~25 min); afterwards: download eval data, evaluate, profile,
-  report, scoreboard
-- Three-pass review workflow running (correctness / research
-  integrity / code quality, each finding adversarially verified)
+- Awaiting operator decision on DML-0001 (stopped mid-run on the laptop
+  GPU at their request): finish on CPU, move to a cloud GPU, or abandon
+  and record as INTERRUPTED. The registry still says RUNNING because the
+  status write was also declined — do not run `scripts/set_status.py`
+  without approval.
+- M0.9 real-run remainder blocked on that decision: download eval data,
+  evaluate, profile, report, scoreboard (all need approval too).
 
 ## Known issues
 
 - `scripts/download_eval_data.py` requires the optional `datasets` package
   (`pip install -e ".[evals]"`) and network access; core tests never touch
-  the network. (Install was in flight at snapshot time.)
+  the network. The HellaSwag source id needed the `Rowan/hellaswag`
+  namespace form for datasets 5.x (fixed, committed). The download itself
+  has not been re-run — the operator declined it.
 - Resuming with a *different* `training.steps` than the checkpointed run
   deliberately changes the LR-schedule horizon; the trainer now prints a
   loud warning — such a continuation is NOT comparable to an uninterrupted
   run and the tests pin the horizon.
+- Deferred review finding (low, unfixed): a process killed without a
+  Python exception (SIGKILL, power loss) leaves the experiment status
+  RUNNING forever — there is no heartbeat/staleness detection yet.
+
+## Review findings fixed (three-pass adversarial review)
+
+All 10 confirmed findings fixed, each with a regression test (suite
+65 → 75, green, CPU-only):
+
+- **HIGH** rescue-checkpoint double-apply: `last_step`/`resume_rng` were
+  updated after validation/checkpointing, so Ctrl+C during validation
+  saved weights-with-the-step-applied under a rolled-back step label →
+  the step was applied twice on resume. Boundary is now captured
+  immediately after the optimizer step.
+- **HIGH ×2** prepare-cache config drift: the cache early-return ignored
+  train_fraction/source_url/version/tokenizer changes and never verified
+  hashes (the docstring claimed it did). Now compares the full requested
+  config plus the tokenizer sha256 and REFUSES with a --force hint.
+- **HIGH** eval/profiling scripts trusted whatever tokenizer file sat at
+  the checkpoint's path. They now verify the sha256 pinned in the
+  experiment metadata (DomovoiTokenizer.from_metadata) and record the
+  hash in evals.json/profile.json.
+- **MEDIUM** GradScaler state never checkpointed (fp16 resume would
+  diverge) — now saved as scaler.pt and restored.
+- **MEDIUM** decode_tok_per_s counted the prefill-sampled token over only
+  the decode loop's time (~14% inflated at max_new_tokens=8, absurd at
+  1); it now covers exactly the timed tokens and is null when the loop
+  never ran. max_new_tokens=0 no longer emits a token.
+- **MEDIUM** resuming a completed run overwrote summary.json with
+  session-only stats (0 tok/s, eval-only VRAM peak) — zero-progress
+  sessions now keep the stored summary.
+- **MEDIUM** val_ppl docstring claimed exact agreement with training val
+  loss while using different batch counts and precision; now defaults to
+  the trainer's eval_batches, shares fixed_val_generator, records
+  `precision: "fp32"` and an honest caveat.
+- **LOW** get_batch off-by-one excluded the corpus's final window and
+  crashed on an exactly-minimum-sized file.
+- Also: `--resume` without `--experiment-dir` is now a hard error (it
+  silently trained from scratch before); INTERRUPTED runs exit 1;
+  checkpoint swap is crash-safe (.bak aside + recovery in latest());
+  report comparisons warn when eval scopes differ; dead code removed.
 
 ## Failed approaches
 
@@ -134,8 +187,13 @@ docs/                pipeline notes
 ```
 python scripts/prepare_data.py --config configs/baseline_small.yaml
 python scripts/train.py --config configs/baseline_small.yaml
-python scripts/train.py --config configs/baseline_small.yaml --resume
+# resume requires the experiment dir (a fresh dir would silently restart):
+python scripts/train.py --config configs/baseline_small.yaml \
+    --resume --experiment-dir experiments/DML-0001
 ```
+
+Note: the operator has directed that no further local GPU training runs
+without explicit approval.
 
 ## How to run inference
 
@@ -159,11 +217,13 @@ python -m pytest tests/ -v          # all tests, CPU, no network
 
 ## Latest experiment
 
-DML-0001 (baseline_small_v1) — training in progress at snapshot time.
-See `experiments/DML-0001/` once complete: metadata.json, summary.json,
-metrics.jsonl, val_metrics.jsonl, evals.json, profile.json, report.md.
-Will hold real measured numbers only — nothing in this file or the
-report is ever estimated.
+DML-0001 (baseline_small_v1) — STOPPED by the operator at ~step 520/3000
+on the laptop GPU (~17.5k tok/s until then; loss 7.4→3.4, val ppl ~104
+at step 500). The registry status write was declined and has NOT been
+done; the directory still says RUNNING, which is stale. Its recorded
+artifacts so far (metrics.jsonl, val_metrics.jsonl, checkpoints through
+step 500) are real measured data and must not be deleted. Decide with
+the operator: finish on CPU / cloud GPU, or record as INTERRUPTED.
 
 ## Latest benchmark results
 
@@ -178,15 +238,17 @@ None yet. Do not invent any.
 
 ## Immediate next steps
 
-1. Wait for DML-0001 training to finish (~step 3000).
-2. `python scripts/download_eval_data.py --tasks all --limit 500`
-   (network permitting), then `python scripts/evaluate.py --experiment DML-0001`.
-3. `python scripts/profile_model.py --experiment DML-0001`.
-4. `python scripts/make_report.py --experiment DML-0001` and
-   `python scripts/scoreboard.py`.
-5. Triage the three-pass review findings; fix the confirmed ones and
-   re-run the full test suite.
-6. Update ROADMAP.md checkboxes and this file; commit.
+**All of these need explicit operator approval — none were approved yet:**
+
+1. Operator decides the fate of DML-0001: (a) finish on CPU only,
+   (b) move to a cloud GPU, or (c) record as INTERRUPTED
+   (`scripts/set_status.py`) and treat the pipeline as validated by the
+   CPU test suite alone.
+2. If continuing: resume training (`--resume --experiment-dir
+   experiments/DML-0001`), then download eval data
+   (`python scripts/download_eval_data.py --tasks all --limit 500`),
+   evaluate, profile, report, scoreboard.
+3. Update ROADMAP.md checkboxes and this file; commit.
 
 ## Longer-term next steps
 

@@ -2,7 +2,14 @@
 
 Usage:
     python scripts/train.py --config configs/baseline_small.yaml
-    python scripts/train.py --config configs/baseline_small.yaml --resume
+    python scripts/train.py --config configs/baseline_small.yaml \
+        --resume --experiment-dir experiments/DML-0001
+
+--resume always requires --experiment-dir: without it a fresh experiment
+would be allocated and training would silently restart from step 0.
+
+Exit code: 0 only when the run COMPLETED.  An interrupted run exits 1 so
+automation never mistakes a partial model for a finished one.
 
 Flow: allocate experiment ID → write metadata (status RUNNING, git commit,
 env, dataset, tokenizer, seed) → train (checkpoints, metrics, val loss) →
@@ -36,6 +43,13 @@ def main() -> int:
 
     cfg = load_config(args.config)
     env = collect_env_info()
+
+    if args.resume and not args.experiment_dir:
+        raise SystemExit(
+            "--resume requires --experiment-dir: resuming without it would "
+            "allocate a brand-new experiment and silently train from "
+            "step 0.\nUsage: python scripts/train.py --config CONFIG "
+            "--resume --experiment-dir experiments/DML-XXXX")
 
     # ---- experiment bookkeeping ---------------------------------------
     if args.experiment_dir:
@@ -93,7 +107,9 @@ def main() -> int:
                        notes="pipeline completed; research label from config")
         else:
             set_status(exp_dir, status)
-    return 0 if status in ("COMPLETED", "INTERRUPTED") else 1
+    # an INTERRUPTED run is a partial model: exit 1 so pipelines/CI never
+    # treat it as a finished training step
+    return 0 if status == "COMPLETED" else 1
 
 
 if __name__ == "__main__":

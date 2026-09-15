@@ -16,8 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from domovoi.config import config_from_dict
-from domovoi.datasets import DomovoiTokenizer
+from domovoi.datasets import DomovoiTokenizer, verify_vocab
 from domovoi.inference import generate, load_model_for_inference
 
 
@@ -41,10 +40,7 @@ def main() -> int:
         raise SystemExit(
             "Checkpoint config has no tokenizer path; the tokenizer must be "
             "available where it was when training ran.")
-    verify = tokenizer.vocab_size == cfg.model.vocab_size
-    if not verify:
-        raise SystemExit(
-            f"Tokenizer vocab {tokenizer.vocab_size} != model vocab {cfg.model.vocab_size}")
+    verify_vocab(tokenizer, cfg.model.vocab_size)
 
     result = generate(
         model, args.prompt, tokenizer,

@@ -8,8 +8,12 @@ Design rules:
 - **Everything is recorded**: raw file sha256, split sha256, tokenizer
   sha256, token counts and timestamps go into `meta.json` inside the
   processed directory.  The training pipeline refuses to run without it.
-- **Caching**: if the processed data exists and the recorded hashes match,
-  preparation is a no-op (`--force` redoes it).
+- **Caching**: if the processed data exists, was prepared with exactly the
+  requested config (name / source_url / version / train_fraction /
+  tokenizer) and the recorded hashes still match the files on disk,
+  preparation is a no-op.  Any config drift is REFUSED with a message telling
+  you to re-run with `--force` — silently reusing stale data (or silently
+  re-preparing hours of work) is never allowed (`--force` redoes it).
 - **Contamination safety**: this module only ever touches training corpora
   under `data/raw` / `data/processed`.  Benchmark evaluation data lives in
   a separate tree (`data/evals`, written by scripts/download_eval_data.py)
@@ -97,7 +101,42 @@ def prepare_dataset(
     meta_path = processed_dir / "meta.json"
     if meta_path.exists() and not force:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if meta.get("complete") and pathlib.Path(meta["tokenizer"]["path"]).exists():
+        cached_ds = meta.get("dataset", {})
+        cached_tok = meta.get("tokenizer", {})
+        tok_file = pathlib.Path(cached_tok.get("path", ""))
+        if meta.get("complete") and tok_file.exists():
+            # The cached data is usable ONLY if it was prepared with exactly
+            # the config being requested now and the recorded tokenizer hash
+            # still matches the file on disk.  A silent cache hit on drifted
+            # config would train on stale data while the experiment records
+            # the new config — the worst kind of provenance lie.
+            requested_vs_cached = [
+                ("dataset.name", name, cached_ds.get("name")),
+                ("dataset.source_url", source_url, cached_ds.get("source_url")),
+                ("dataset.version", version, cached_ds.get("version")),
+                ("dataset.train_fraction", train_fraction,
+                 cached_ds.get("train_fraction")),
+                ("tokenizer.requested_vocab_size", vocab_size,
+                 cached_tok.get("requested_vocab_size")),
+                ("tokenizer.path", str(tokenizer_path), cached_tok.get("path")),
+            ]
+            mismatches = [
+                f"  {field}: cached={cached!r}, requested={wanted!r}"
+                for field, wanted, cached in requested_vs_cached
+                if cached is not None and cached != wanted
+            ]
+            current_sha = sha256_file(tok_file)
+            if cached_tok.get("sha256") and current_sha != cached_tok["sha256"]:
+                mismatches.append(
+                    f"  tokenizer.sha256: cached={cached_tok['sha256']}, "
+                    f"on disk={current_sha} (the tokenizer file changed "
+                    f"since the bins were packed)")
+            if mismatches:
+                raise RuntimeError(
+                    f"Processed data at {processed_dir} was prepared with a "
+                    f"different configuration:\n" + "\n".join(mismatches)
+                    + "\nRe-run with --force to rebuild the dataset with the "
+                    f"new configuration (the old data will be repacked).")
             return meta
 
     # -- 1. raw corpus ------------------------------------------------
@@ -133,6 +172,9 @@ def prepare_dataset(
             "vocab_size": DomovoiTokenizer(tokenizer_path).vocab_size,
             "version": "byte-bpe-v1",
         }
+    # requested vs actual can differ (tiny corpora run out of merges); record
+    # the request so the cache check above can detect config drift
+    tok_meta["requested_vocab_size"] = vocab_size
     tok = DomovoiTokenizer(tokenizer_path)
     if tok.vocab_size > 65535:
         raise RuntimeError(

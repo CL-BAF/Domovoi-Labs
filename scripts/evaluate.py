@@ -18,8 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from domovoi.config import config_from_dict
-from domovoi.datasets import DomovoiTokenizer
+from domovoi.datasets import DomovoiTokenizer, verify_vocab
 from domovoi.evals import DEFAULT_TASKS, run_evals
 from domovoi.experiments import load_metadata, update_metadata
 from domovoi.training import CheckpointManager
@@ -35,7 +34,10 @@ def main() -> int:
                     help="comma-separated eval task names")
     ap.add_argument("--limit", type=int, default=None,
                     help="cap examples per task (fast research mode)")
-    ap.add_argument("--val-batches", type=int, default=50)
+    ap.add_argument("--val-batches", type=int, default=None,
+                    help="val_ppl batch count; defaults to the training "
+                         "config's eval_batches (comparable with "
+                         "training-time validation)")
     args = ap.parse_args()
 
     meta = load_metadata(args.experiment)
@@ -50,7 +52,17 @@ def main() -> int:
     device = detect_device()
     model = model.to(device)
     model.eval()
-    tokenizer = DomovoiTokenizer(cfg.tokenizer.path)
+
+    # The experiment metadata pins the tokenizer (sha256) that the model was
+    # trained with.  Refuse to score through any other tokenizer — a
+    # retrained/replaced file at the same path would silently corrupt every
+    # log-likelihood score while vocab_size still matches.
+    tok_meta = meta.get("tokenizer") or {}
+    if tok_meta.get("sha256"):
+        tokenizer = DomovoiTokenizer.from_metadata(tok_meta)
+    else:
+        tokenizer = DomovoiTokenizer(cfg.tokenizer.path)
+        verify_vocab(tokenizer, cfg.model.vocab_size)
 
     tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
     print(f"[eval] experiment {meta['experiment_id']} checkpoint {ckpt_dir.name}")
@@ -65,6 +77,7 @@ def main() -> int:
     results.update({
         "experiment_id": meta["experiment_id"],
         "checkpoint": str(ckpt_dir),
+        "tokenizer_sha256": tokenizer.sha256,
         "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "runtime_s": round(time.time() - started, 1),
         "limit": args.limit,

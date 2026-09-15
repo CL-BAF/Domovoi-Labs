@@ -68,6 +68,74 @@ def test_prepare_smoke_dataset(smoke_dataset):
     assert meta2["dataset"]["raw_sha256"] == meta["dataset"]["raw_sha256"]
 
 
+def test_prepare_cache_hit_with_same_config_is_noop(smoke_dataset):
+    """Identical config → the cache must be honored (no re-pack)."""
+    cfg = smoke_dataset["config_dict"]
+    meta = prepare_dataset(
+        name="smoke", source_url="synthetic", version="smoke-v1",
+        train_fraction=0.9, processed_dir=cfg["dataset"]["processed_dir"],
+        tokenizer_path=cfg["tokenizer"]["path"], vocab_size=300)
+    assert meta["complete"]
+    assert meta["dataset"]["train_fraction"] == 0.9
+
+
+def test_prepare_cache_rejects_config_drift(smoke_dataset):
+    """A cached dataset prepared with a different train_fraction must be
+    REFUSED, not silently reused — otherwise the experiment would record the
+    new config while training on the old split."""
+    cfg = smoke_dataset["config_dict"]
+    with pytest.raises(RuntimeError, match="force"):
+        prepare_dataset(
+            name="smoke", source_url="synthetic", version="smoke-v1",
+            train_fraction=0.5,                    # drifted
+            processed_dir=cfg["dataset"]["processed_dir"],
+            tokenizer_path=cfg["tokenizer"]["path"], vocab_size=300)
+
+
+def test_prepare_cache_rejects_changed_tokenizer(smoke_dataset, tmp_path):
+    """If the tokenizer file changed on disk after the bins were packed, the
+    cached data is stale (ids would be misinterpreted) — refuse."""
+    import json
+    import pathlib
+    import shutil
+
+    src_dir = pathlib.Path(smoke_dataset["config_dict"]["dataset"]["processed_dir"])
+    dst_dir = tmp_path / "processed"
+    shutil.copytree(src_dir, dst_dir)
+    dst_tok = tmp_path / "tok.json"
+    shutil.copy(smoke_dataset["config_dict"]["tokenizer"]["path"], dst_tok)
+    meta = json.loads((dst_dir / "meta.json").read_text(encoding="utf-8"))
+    meta["tokenizer"]["path"] = str(dst_tok)
+    (dst_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    # mutate the tokenizer file after packing (same vocab, different bytes)
+    dst_tok.write_bytes(dst_tok.read_bytes() + b" ")
+
+    with pytest.raises(RuntimeError, match="sha256"):
+        prepare_dataset(
+            name="smoke", source_url="synthetic", version="smoke-v1",
+            train_fraction=0.9, processed_dir=dst_dir,
+            tokenizer_path=dst_tok, vocab_size=300)
+
+
+def test_trainer_refuses_changed_tokenizer(smoke_dataset):
+    """The Trainer must refuse to train when the configured tokenizer no
+    longer matches the one recorded in the processed-data meta (sha256),
+    even if vocab_size still agrees — otherwise train.bin's token ids are
+    silently misinterpreted."""
+    import pathlib
+
+    from domovoi.config import config_from_dict
+    from domovoi.training import Trainer
+
+    cfg = config_from_dict(smoke_dataset["config_dict"])
+    tok_path = pathlib.Path(cfg.tokenizer.path)
+    # trailing whitespace keeps the JSON valid and the vocab identical;
+    # only the file hash changes
+    tok_path.write_bytes(tok_path.read_bytes() + b" ")
+    with pytest.raises(RuntimeError, match="sha256"):
+        Trainer(cfg, experiment_dir=None, device=torch.device("cpu"))
+
+
 def test_get_batch_shapes_and_determinism(smoke_dataset):
     meta = smoke_dataset["meta"]
     data = PackedTokenData(meta["files"]["train_bin"])
@@ -92,6 +160,27 @@ def test_val_batches_are_fixed_across_calls(smoke_dataset):
     x1, _ = data.get_batch(2, 16, device, fixed_val_generator(device))
     x2, _ = data.get_batch(2, 16, device, fixed_val_generator(device))
     assert torch.equal(x1, x2)
+
+
+def test_get_batch_covers_full_window_range(tmp_path):
+    """The last valid window of the corpus must be reachable, and an
+    exactly-minimum-sized file (block_size+1 tokens) must not crash."""
+    block = 16
+    # block + 2 tokens → valid offsets are exactly {0, 1}
+    p = tmp_path / "two_windows.bin"
+    np.arange(block + 2, dtype=np.uint16).tofile(p)
+    data = PackedTokenData(p)
+    g = torch.Generator()
+    g.manual_seed(0)
+    x, _ = data.get_batch(256, block, torch.device("cpu"), g)
+    assert set(x[:, 0].tolist()) == {0, 1}
+
+    # exact minimum: block + 1 tokens (single valid window at offset 0)
+    p2 = tmp_path / "minimum.bin"
+    np.arange(block + 1, dtype=np.uint16).tofile(p2)
+    x2, y2 = PackedTokenData(p2).get_batch(4, block, torch.device("cpu"), g)
+    assert x2.shape == (4, block) and y2.shape == (4, block)
+    assert torch.equal(x2[:, 0], torch.zeros(4, dtype=torch.int64))
 
 
 def test_eval_data_isolation():

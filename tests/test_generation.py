@@ -1,5 +1,6 @@
 """Generation: sampling correctness, determinism, KV-cache path, metrics."""
 
+import pytest
 import torch
 
 from domovoi.inference import generate
@@ -108,3 +109,28 @@ def test_context_boundary_respected(tiny_cfg):
     r = generate(model, prompt, tok, max_new_tokens=model.cfg.context_length + 50,
                  temperature=0.0)
     assert r["n_prompt_tokens"] + r["n_new_tokens"] <= model.cfg.context_length
+
+
+def test_decode_throughput_is_honest(tiny_cfg):
+    """decode_tok_per_s covers exactly the timed decode-loop tokens.  When
+    the decode loop never ran (max_new_tokens <= 1) it must be null — never
+    a token counted over ~0 seconds."""
+    model = _trained_model(tiny_cfg)
+    tok = _Tok()
+
+    r0 = generate(model, "abc", tok, max_new_tokens=0, temperature=0.0)
+    assert r0["n_new_tokens"] == 0
+    assert r0["new_text"] == ""
+    assert r0["decode_tok_per_s"] is None
+
+    r1 = generate(model, "abc", tok, max_new_tokens=1, temperature=0.0)
+    assert r1["n_new_tokens"] == 1
+    assert r1["decode_tok_per_s"] is None
+
+    # max_new_tokens >= 2: the loop ran, the number is real
+    r5 = generate(model, "abc", tok, max_new_tokens=5, temperature=0.0)
+    assert r5["n_new_tokens"] == 5
+    assert r5["decode_tok_per_s"] > 0
+
+    with pytest.raises(ValueError):
+        generate(model, "abc", tok, max_new_tokens=-1)

@@ -35,7 +35,7 @@ EVAL_ROOT = Path("data") / "evals"
 
 # HF dataset name -> (config, split)
 SOURCES = {
-    "hellaswag": ("hellaswag", None, "validation"),
+    "hellaswag": ("Rowan/hellaswag", None, "validation"),
     "arc_challenge": ("allenai/ai2_arc", "ARC-Challenge", "test"),
     "piqa": ("ybisk/piqa", None, "validation"),
     "winogrande": ("allenai/winogrande", "winogrande_xl", "validation"),

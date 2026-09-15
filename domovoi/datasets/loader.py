@@ -40,7 +40,12 @@ class PackedTokenData:
             raise RuntimeError(
                 f"Packed token file {self.path} has only {self.n_tokens} tokens; "
                 f"need at least block_size+1 = {block_size + 1}.")
-        ix = torch.randint(self.n_tokens - block_size - 1, (batch_size,),
+        # valid offsets are i with i + 1 + block_size <= n_tokens, i.e.
+        # 0 .. n_tokens - block_size - 1.  randint's high bound is EXCLUSIVE,
+        # so high = n_tokens - block_size covers exactly that range (the
+        # off-by-one alternative would silently exclude the final window of
+        # the corpus and crash on an exactly-minimum-sized file).
+        ix = torch.randint(self.n_tokens - block_size, (batch_size,),
                            generator=generator)
         x = torch.stack([
             torch.from_numpy(self.data[i:i + block_size].astype(np.int64))
@@ -64,10 +69,3 @@ def fixed_val_generator(device: torch.device) -> torch.Generator:
     g = torch.Generator()
     g.manual_seed(0)
     return g
-
-
-def estimate_tokens(trained_steps: int, batch_size: int, block_size: int,
-                    grad_accum: int) -> int:
-    """Tokens of training signal consumed: each optimizer step processes
-    batch_size * block_size * grad_accum forward passes worth of tokens."""
-    return trained_steps * batch_size * block_size * grad_accum

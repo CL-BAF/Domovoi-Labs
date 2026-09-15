@@ -18,9 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from domovoi.datasets import DomovoiTokenizer
+from domovoi.datasets import DomovoiTokenizer, verify_vocab
 from domovoi.experiments import load_metadata, update_metadata
-from domovoi.profiling import profile_checkpoint
+from domovoi.profiling import profile_model
 from domovoi.training import CheckpointManager
 from domovoi.training.checkpoint import build_model_from_checkpoint
 from domovoi.utils import detect_device
@@ -49,8 +49,20 @@ def main() -> int:
         print("[profile] NOTE: CUDA unavailable — VRAM fields will be null "
               "(never estimated).")
 
-    _, cfg, _ = build_model_from_checkpoint(ckpt_dir)
-    tokenizer = DomovoiTokenizer(cfg.tokenizer.path)
+    # build once: profile_model takes the loaded model directly, so the
+    # checkpoint is read from disk exactly once
+    model, cfg, _ = build_model_from_checkpoint(ckpt_dir)
+    model = model.to(device)
+    model.eval()
+
+    # same drift guard as evaluate.py: never profile through a tokenizer
+    # other than the one the experiment was trained with
+    tok_meta = meta.get("tokenizer") or {}
+    if tok_meta.get("sha256"):
+        tokenizer = DomovoiTokenizer.from_metadata(tok_meta)
+    else:
+        tokenizer = DomovoiTokenizer(cfg.tokenizer.path)
+        verify_vocab(tokenizer, cfg.model.vocab_size)
 
     lengths = args.context_sweep
     if lengths is None and not args.no_sweep:
@@ -58,20 +70,22 @@ def main() -> int:
         ladder = [64, 128, 256, 512]
         lengths = [l for l in ladder if l <= cap] or [cap]
 
-    profile = profile_checkpoint(
-        ckpt_dir, tokenizer, device,
+    profile = profile_model(
+        model, cfg, tokenizer, device, ckpt_dir=ckpt_dir,
         max_new_tokens=args.max_new_tokens,
         context_sweep=(not args.no_sweep),
         context_lengths=lengths,
     )
     profile["experiment_id"] = meta["experiment_id"]
+    profile["tokenizer_sha256"] = tokenizer.sha256
     out = exp_dir / "profile.json"
     out.write_text(json.dumps(profile, indent=2), encoding="utf-8")
     update_metadata(exp_dir, {"profile_file": str(out)})
 
     inf = profile["inference"]
     print(f"[profile] params       : {profile['parameters']['total']:,}")
-    print(f"[profile] ckpt size    : {profile['checkpoint_size_mb']} MiB")
+    if profile.get("checkpoint_size_mb") is not None:
+        print(f"[profile] ckpt size    : {profile['checkpoint_size_mb']} MiB")
     print(f"[profile] decode tok/s : {inf['decode_tok_per_s_median']}")
     print(f"[profile] ttft         : {inf['ttft_s_median'] * 1000:.1f} ms")
     if inf.get("peak_vram_allocated_mb") is not None:

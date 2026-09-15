@@ -70,7 +70,10 @@ def profile_inference(model, tokenizer, device, prompt: str = "Once upon a time"
 
     runs = [generate(model, prompt, tokenizer, max_new_tokens=max_new_tokens,
                      temperature=0.0) for _ in range(n_repeats)]
-    decode = sorted(r["decode_tok_per_s"] for r in runs)
+    # decode_tok_per_s is None when the decode loop produced no tokens
+    # (max_new_tokens <= 1); never fabricate a number for those runs
+    decode = sorted(r["decode_tok_per_s"] for r in runs
+                    if r["decode_tok_per_s"] is not None)
     prefill = sorted(r["prefill_tok_per_s"] for r in runs)
     ttft = sorted(r["ttft_s"] for r in runs)
     stats = vram_stats(device)
@@ -80,7 +83,7 @@ def profile_inference(model, tokenizer, device, prompt: str = "Once upon a time"
         "max_new_tokens": max_new_tokens,
         "n_repeats": n_repeats,
         "prefill_tok_per_s_median": prefill[len(prefill) // 2],
-        "decode_tok_per_s_median": decode[len(decode) // 2],
+        "decode_tok_per_s_median": decode[len(decode) // 2] if decode else None,
         "ttft_s_median": round(ttft[len(ttft) // 2], 6),
         "peak_vram_allocated_mb": stats["peak_allocated_mb"],
         "peak_vram_reserved_mb": stats["peak_reserved_mb"],
@@ -120,24 +123,22 @@ def profile_context_sweep(model, tokenizer, device,
     return results
 
 
-def profile_checkpoint(ckpt_dir, tokenizer, device: Optional[torch.device] = None,
-                       max_new_tokens: int = 64, context_sweep: bool = True,
-                       context_lengths: Optional[list[int]] = None) -> dict:
-    """Full profile of one checkpoint.  Returns the profile.json payload."""
-    from ..training.checkpoint import build_model_from_checkpoint
-    from ..utils import detect_device
-
-    device = device if device is not None else detect_device()
-    model, cfg, meta = build_model_from_checkpoint(ckpt_dir)
-    model = model.to(device)
+def profile_model(model, cfg, tokenizer, device: torch.device,
+                  ckpt_dir: Optional[str | pathlib.Path] = None,
+                  max_new_tokens: int = 64, context_sweep: bool = True,
+                  context_lengths: Optional[list[int]] = None) -> dict:
+    """Full profile of an already-built, already-loaded model.  `ckpt_dir`
+    is optional and only used to report the checkpoint path/size; callers
+    that already have the model in memory pass it to avoid building and
+    reading the checkpoint a second time."""
     model.eval()
-
     profile = {
-        "checkpoint": str(ckpt_dir),
+        "checkpoint": str(ckpt_dir) if ckpt_dir is not None else None,
         "architecture": cfg.model.architecture,
         "context_length": cfg.model.context_length,
         "parameters": count_parameters(model),
-        "checkpoint_size_mb": checkpoint_size_mb(ckpt_dir),
+        "checkpoint_size_mb": checkpoint_size_mb(ckpt_dir)
+            if ckpt_dir is not None else None,
         "inference": profile_inference(model, tokenizer, device,
                                        max_new_tokens=max_new_tokens),
         "profiled_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -146,3 +147,22 @@ def profile_checkpoint(ckpt_dir, tokenizer, device: Optional[torch.device] = Non
         profile["context_sweep"] = profile_context_sweep(
             model, tokenizer, device, lengths=context_lengths)
     return profile
+
+
+def profile_checkpoint(ckpt_dir, tokenizer, device: Optional[torch.device] = None,
+                       max_new_tokens: int = 64, context_sweep: bool = True,
+                       context_lengths: Optional[list[int]] = None) -> dict:
+    """Full profile of one checkpoint (builds the model from disk).  Returns
+    the profile.json payload.  Callers that already built the model should
+    call profile_model directly."""
+    from ..training.checkpoint import build_model_from_checkpoint
+    from ..utils import detect_device
+
+    device = device if device is not None else detect_device()
+    model, cfg, meta = build_model_from_checkpoint(ckpt_dir)
+    model = model.to(device)
+    model.eval()
+    return profile_model(model, cfg, tokenizer, device, ckpt_dir=ckpt_dir,
+                         max_new_tokens=max_new_tokens,
+                         context_sweep=context_sweep,
+                         context_lengths=context_lengths)

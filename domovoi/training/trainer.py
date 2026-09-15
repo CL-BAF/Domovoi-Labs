@@ -9,9 +9,9 @@ The Trainer owns one experiment run end to end:
 Everything is driven by a domovoi.config.Config; the trainer takes no
 experiment-specific constants.
 
-Resume is bit-exact: model + optimizer + scheduler + step + all RNG states
-(including the data-batch generator) are restored, so continuing from a
-checkpoint produces the same trajectory as an uninterrupted run.
+Resume is bit-exact: model + optimizer + scheduler + GradScaler + step + all
+RNG states (including the data-batch generator) are restored, so continuing
+from a checkpoint produces the same trajectory as an uninterrupted run.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from typing import Optional
 import torch
 
 from ..config import Config
-from ..datasets import (DomovoiTokenizer, PackedTokenData,
+from ..datasets import (DomovoiTokenizer, PackedTokenData, fixed_val_generator,
                        load_processed_meta, verify_vocab)
 from ..models import build_model
 from ..utils import (detect_device, resolve_precision, set_seed)
@@ -53,6 +53,19 @@ class Trainer:
         self.data_meta = load_processed_meta(config.dataset.processed_dir)
         self.tokenizer = DomovoiTokenizer(config.tokenizer.path)
         verify_vocab(self.tokenizer, config.model.vocab_size)
+        # The packed bins were tokenized by whatever tokenizer file existed at
+        # prepare time; meta.json records its sha256.  If the file at
+        # tokenizer.path has since been retrained or replaced, every token id
+        # in train.bin/val.bin would be misinterpreted — refuse to train.
+        packed_sha = (self.data_meta.get("tokenizer") or {}).get("sha256")
+        if packed_sha and self.tokenizer.sha256 != packed_sha:
+            raise RuntimeError(
+                f"Tokenizer at {config.tokenizer.path} (sha256 "
+                f"{self.tokenizer.sha256}) is not the tokenizer that packed "
+                f"{config.dataset.processed_dir} (sha256 {packed_sha}). "
+                f"Training on these bins would corrupt the token-id mapping. "
+                f"Re-run scripts/prepare_data.py --force (or point "
+                f"tokenizer.path at the original file).")
         self.train_data = PackedTokenData(self.data_meta["files"]["train_bin"])
         self.val_data = PackedTokenData(self.data_meta["files"]["val_bin"])
         # the batch-offset generator is a *separate* deterministic stream,
@@ -91,7 +104,7 @@ class Trainer:
         if resume and self.ckpt is not None and self.ckpt.latest() is not None:
             meta, rng = load_checkpoint(
                 self.ckpt.latest(), self.model, self.optimizer, self.scheduler,
-                restore_rng=False)
+                scaler=self.scaler, restore_rng=False)
             self.start_step = meta["step"]
             self.tokens_seen = meta["tokens_seen"]
             ckpt_steps = meta.get("config", {}).get("training", {}).get("steps")
@@ -105,6 +118,13 @@ class Trainer:
             if gen_state is not None:
                 self.data_generator.set_state(gen_state.to(torch.uint8))
             restore_rng_state(rng.get("standard") or {})
+        elif resume:
+            # nothing to resume from: say so loudly instead of silently
+            # training from step 0 (hours of compute restarted without a trace)
+            where = (f"under {self.ckpt.root}" if self.ckpt is not None
+                     else "(no experiment dir given)")
+            print(f"[trainer] WARNING: resume requested but no checkpoint "
+                  f"found {where}; training starts from step 0.", flush=True)
 
         # -- VRAM tracking ---------------------------------------------------
         self._vram_supported = self.device.type == "cuda"
@@ -130,8 +150,7 @@ class Trainer:
         steps/checkpoints/runs)."""
         t = self.config.training
         self.model.eval()
-        gen = torch.Generator()
-        gen.manual_seed(0)
+        gen = fixed_val_generator(self.device)
         losses = []
         with self._autocast():
             for _ in range(n_batches):
@@ -164,6 +183,7 @@ class Trainer:
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
+            scaler=self.scaler,
             tokens_seen=self.tokens_seen,
             config=self.config,
             extra=extra,
@@ -238,6 +258,19 @@ class Trainer:
                 self.scheduler.step()
 
                 self.tokens_seen += self.tokens_per_step()
+
+                # The optimizer update for this step is complete and the
+                # weights/accounting/RNG are mutually consistent RIGHT NOW.
+                # Everything below (logging, validation, checkpoint save)
+                # neither changes weights nor advances the batch stream, so
+                # the rescue checkpoint may safely reference this step from
+                # here on.  An interrupt anywhere below — including inside
+                # periodic validation, the widest window in the loop — replays
+                # from a consistent boundary.
+                last_step = step + 1
+                resume_rng = (capture_rng_state(),
+                              self.data_generator.get_state().clone())
+
                 batch_loss = sum(micro_losses) / len(micro_losses)
                 running_loss += batch_loss
                 running_batches += 1
@@ -276,13 +309,6 @@ class Trainer:
                 if (step + 1) % t.checkpoint_interval == 0:
                     self._save_checkpoint(step + 1)
 
-                # the step is now fully complete; only now may the rescue
-                # checkpoint reference it (set at the top would let an
-                # interrupt mid-step save a step that never ran)
-                last_step = step + 1
-                resume_rng = (capture_rng_state(),
-                              self.data_generator.get_state().clone())
-
         except KeyboardInterrupt:
             print("\n[trainer] Interrupted — saving rescue checkpoint.", flush=True)
             status = "INTERRUPTED"
@@ -295,6 +321,19 @@ class Trainer:
 
         # -- final checkpoint + summary ------------------------------------
         final_step = last_step
+        summary_path = self.experiment_dir / "summary.json" \
+            if self.experiment_dir is not None else None
+        if (final_step == self.start_step and summary_path is not None
+                and summary_path.is_file()):
+            # No steps completed this session (e.g. --resume on an
+            # already-complete run, or an interrupt before the first step
+            # finished).  A fresh summary would record session-only wall
+            # clock, ~0 tok/s and an eval-only VRAM peak, destroying the
+            # original end-to-end measurement.  Nothing about the run
+            # changed, so the stored summary remains the honest record.
+            print("[trainer] no new steps this session; keeping the existing "
+                  "summary.json (nothing about the run changed)", flush=True)
+            return json.loads(summary_path.read_text(encoding="utf-8"))
         if status == "COMPLETED" and self.ckpt is not None:
             self._save_checkpoint(t.steps)
         final = self.evaluate(t.eval_batches)
