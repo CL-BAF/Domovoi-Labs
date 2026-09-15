@@ -1,0 +1,31 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# --- Data (downloaded / processed; never commit corpora) ---
+data/raw/
+data/processed/
+data/evals/
+data/tokenizers/
+
+# --- Experiment artifacts: keep metadata/results/reports, never checkpoints ---
+experiments/*/checkpoints/
+
+# --- Model binaries ---
+*.safetensors
+*.pt
+*.bin
+
+# --- OS noise ---
+Thumbs.db
+.DS_Store
+
+# --- Original spec archive (inputs live in the repo as .md) ---
+domovoi_labs_phase1_spec.zip
+
+# --- Scratch ---
+scratch/

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "domovoi-labs"
+version = "0.1.0"
+description = "Domovoi Labs: research pipeline for capability-per-GiB language model experiments"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.26",
+    "PyYAML>=6.0",
+    "tqdm>=4.66",
+    "requests>=2.31",
+    "safetensors>=0.4",
+    "tokenizers>=0.19",
+]
+
+[project.optional-dependencies]
+# `datasets` is only needed by scripts/download_eval_data.py (benchmark data prep).
+# It is kept optional so the core pipeline has a minimal, stable dependency set.
+evals = [
+    "datasets>=2.19",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["domovoi*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

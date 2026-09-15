@@ -1,0 +1,53 @@
+# Tiny configuration used by the end-to-end smoke test and by CPU-only testing.
+# Trains a ~100k-parameter model for a few steps on a synthetic corpus.
+# The whole config runs in well under a minute on CPU.
+
+experiment:
+  name: "smoke_test"
+  notes: "CPU-friendly end-to-end pipeline validation"
+  status: "BASELINE"
+
+model:
+  architecture: "baseline_transformer"
+  vocab_size: 512
+  context_length: 128
+  d_model: 64
+  n_layers: 2
+  n_heads: 2
+  ffn_dim: 128
+  dropout: 0.0
+  tie_embeddings: true
+
+tokenizer:
+  type: "byte_bpe"
+  path: ""                    # filled in by the smoke test (synthetic tokenizer path)
+  version: "byte-bpe-v1"
+
+dataset:
+  name: "smoke"               # synthetic corpus generated deterministically in-memory
+  source_url: "synthetic"
+  version: "smoke-v1"
+  train_fraction: 0.9
+  processed_dir: ""           # filled in by the smoke test (tmp dir)
+
+training:
+  steps: 4
+  batch_size: 2
+  gradient_accumulation: 2
+  context_length: 64
+  learning_rate: 1.0e-3
+  min_lr_ratio: 0.1
+  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  grad_clip: 1.0
+  warmup_steps: 1
+  precision: "fp32"
+  seed: 42
+  eval_interval: 4
+  eval_batches: 2
+  checkpoint_interval: 2
+  log_interval: 1
+
+output:
+  experiments_dir: "experiments"
+  experiment_id: null
