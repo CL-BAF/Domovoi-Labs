@@ -89,7 +89,7 @@ The official model card describes a 27B text model with a vision encoder and a 2
 Published Qwen3.8-27B text results include:
 
 | Benchmark | Published score |
-|---:|---:|
+|---|---:|
 | IFBench | 79.5 |
 | GPQA Diamond | 89.2 |
 | HLE | 30.8 |
@@ -99,7 +99,7 @@ Published Qwen3.8-27B text results include:
 
 The first Domovoi target is **text capability only**. Matching Qwen3.8-27B vision/video capability is a separate future research problem.
 
-**Model:** https://huggingface.co/Qwen/Qwen3.5-2B comparison set: https://huggingface.co/Qwen/Qwen3.8-27B
+**Model:** https://huggingface.co/Qwen/Qwen3.8-27B
 
 ---
 
