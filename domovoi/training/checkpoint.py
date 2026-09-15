@@ -94,8 +94,10 @@ def load_checkpoint(
 ) -> tuple[dict, dict]:
     """Load a checkpoint into `model` (required) and, if given, optimizer and
     scheduler.  Returns (checkpoint.json contents, full rng.pt contents).
-    The standard RNG state is restored here; rng["extra"] is left for the
-    caller (the trainer restores its data-batch generator from it)."""
+    The rng.pt contents are ALWAYS returned so the caller can restore extra
+    RNG states (the data-batch generator); `restore_rng` only controls
+    whether the standard RNG state is applied here.  With restore_rng=False
+    the caller is responsible for restoring rng["standard"] itself."""
     ckpt_dir = pathlib.Path(ckpt_dir)
     if not (ckpt_dir / "checkpoint.json").is_file():
         raise CheckpointError(f"No checkpoint found at {ckpt_dir}")
@@ -123,11 +125,11 @@ def load_checkpoint(
     if scheduler is not None:
         scheduler.load_state_dict(
             torch.load(ckpt_dir / "scheduler.pt", map_location="cpu", weights_only=False))
-    rng = {"standard": None, "extra": {}}
-    if restore_rng:
-        rng = torch.load(ckpt_dir / "rng.pt", map_location="cpu", weights_only=False)
-        if rng.get("standard"):
-            restore_rng_state(rng["standard"])
+    rng_pt = ckpt_dir / "rng.pt"
+    rng = torch.load(rng_pt, map_location="cpu", weights_only=False) \
+        if rng_pt.is_file() else {"standard": None, "extra": {}}
+    if restore_rng and rng.get("standard"):
+        restore_rng_state(rng["standard"])
 
     meta = json.loads((ckpt_dir / "checkpoint.json").read_text(encoding="utf-8"))
     return meta, rng
@@ -166,7 +168,7 @@ class CheckpointManager:
     def save(self, step: int, **kwargs) -> pathlib.Path:
         name = f"step_{step:08d}"
         path = self.root / name
-        save_checkpoint(path, **kwargs)
+        save_checkpoint(path, step=step, **kwargs)
         (self.root / "latest.json").write_text(
             json.dumps({"step": step, "path": name}, indent=2), encoding="utf-8")
         return path

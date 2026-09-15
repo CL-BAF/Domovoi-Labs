@@ -106,11 +106,14 @@ def test_eval_data_isolation():
     pkg = pathlib.Path(__file__).resolve().parent.parent / "domovoi" / "datasets"
     for src in pkg.glob("*.py"):
         tree = ast.parse(src.read_text(encoding="utf-8"))
+        # docstrings are bare string-expression statements; mark their
+        # Constant nodes so the walk below can skip them (ast.walk yields
+        # the Expr and its child Constant as separate nodes)
+        docstrings = {id(n.value) for n in ast.walk(tree)
+                      if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)}
         for node in ast.walk(tree):
-            # docstrings are bare string-expression statements — skip them
-            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
-                continue
             if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and id(node) not in docstrings \
                     and "evals" in node.value.lower():
                 raise AssertionError(
                     f"{src.name} references eval data ({node.value!r}). "

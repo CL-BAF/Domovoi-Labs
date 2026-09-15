@@ -3,6 +3,7 @@ checkers, val perplexity."""
 
 import json
 
+import pytest
 import torch
 
 from domovoi.evals import MultipleChoiceEval, build_task, run_evals
@@ -42,8 +43,8 @@ def test_mc_eval_perfect_score_when_choice_is_forced(tiny_cfg, tmp_path):
     ys = torch.roll(xs, -1, dims=1)
     for _ in range(40):
         opt.zero_grad()
-        _, loss = model(xs, targets=ys)
-        loss.backward()
+        out = model(xs, targets=ys)
+        out.loss.backward()
         opt.step()
     model.eval()
 

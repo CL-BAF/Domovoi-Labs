@@ -28,6 +28,7 @@ from ..datasets import (DomovoiTokenizer, PackedTokenData,
                        load_processed_meta, verify_vocab)
 from ..models import build_model
 from ..utils import (detect_device, resolve_precision, set_seed)
+from ..utils.seeding import capture_rng_state, restore_rng_state
 from .checkpoint import CheckpointManager, load_checkpoint
 from .optim import build_optimizer, build_scheduler, current_lr
 
@@ -93,10 +94,16 @@ class Trainer:
                 restore_rng=False)
             self.start_step = meta["step"]
             self.tokens_seen = meta["tokens_seen"]
+            ckpt_steps = meta.get("config", {}).get("training", {}).get("steps")
+            if ckpt_steps is not None and ckpt_steps != t.steps:
+                print(f"[trainer] WARNING: resuming at step {self.start_step} "
+                      f"with training.steps={t.steps}, but the checkpoint was "
+                      f"saved from a run configured for steps={ckpt_steps}. "
+                      f"The LR schedule differs from the original run; the "
+                      f"trajectory will NOT match an uninterrupted run.")
             gen_state = rng.get("extra", {}).get("data_generator")
             if gen_state is not None:
                 self.data_generator.set_state(gen_state.to(torch.uint8))
-            from ..utils.seeding import restore_rng_state
             restore_rng_state(rng.get("standard") or {})
 
         # -- VRAM tracking ---------------------------------------------------
@@ -130,8 +137,8 @@ class Trainer:
             for _ in range(n_batches):
                 x, y = self.val_data.get_batch(
                     t.batch_size, t.context_length, self.device, gen)
-                _, loss = self.model(x, targets=y)
-                losses.append(loss.item())
+                out = self.model(x, targets=y)
+                losses.append(out.loss.item())
         self.model.train()
         val_loss = sum(losses) / len(losses)
         return {
@@ -157,7 +164,6 @@ class Trainer:
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
-            step=step,
             tokens_seen=self.tokens_seen,
             config=self.config,
             extra=extra,
@@ -194,6 +200,14 @@ class Trainer:
         status = "COMPLETED"
         last_step = self.start_step  # last fully completed optimizer step
 
+        # RNG state to resume from `last_step`: captured before the loop and
+        # refreshed the moment a step completes.  An interrupt at any point
+        # (even mid-step, after the batch draw consumed generator state)
+        # rolls back to the last clean boundary so resume replays the
+        # interrupted step exactly.
+        resume_rng = (capture_rng_state(),
+                      self.data_generator.get_state().clone())
+
         try:
             for step in range(self.start_step, t.steps):
                 lr = current_lr(self.optimizer)
@@ -204,13 +218,13 @@ class Trainer:
                 for _ in range(t.gradient_accumulation):
                     x, y = self.get_train_batch()
                     with self._autocast():
-                        _, loss = self.model(x, targets=y)
-                        scaled = loss / t.gradient_accumulation
+                        out = self.model(x, targets=y)
+                    scaled = out.loss / t.gradient_accumulation
                     if self.scaler.is_enabled():
                         self.scaler.scale(scaled).backward()
                     else:
                         scaled.backward()
-                    micro_losses.append(loss.item())
+                    micro_losses.append(out.loss.item())
 
                 if self.scaler.is_enabled():
                     self.scaler.unscale_(self.optimizer)
@@ -266,11 +280,17 @@ class Trainer:
                 # checkpoint reference it (set at the top would let an
                 # interrupt mid-step save a step that never ran)
                 last_step = step + 1
+                resume_rng = (capture_rng_state(),
+                              self.data_generator.get_state().clone())
 
         except KeyboardInterrupt:
             print("\n[trainer] Interrupted — saving rescue checkpoint.", flush=True)
             status = "INTERRUPTED"
             if last_step > self.start_step:
+                # roll RNG back to the boundary of the last completed step;
+                # the interrupted step replays exactly on resume
+                restore_rng_state(resume_rng[0])
+                self.data_generator.set_state(resume_rng[1])
                 self._save_checkpoint(last_step, extra={"interrupted": True})
 
         # -- final checkpoint + summary ------------------------------------

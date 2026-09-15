@@ -13,8 +13,8 @@ def _trained_model(tiny_cfg, steps=30):
     x = torch.randint(0, tiny_cfg.model.vocab_size, (1, 16))
     for _ in range(steps):
         opt.zero_grad()
-        _, loss = model(x, targets=x)
-        loss.backward()
+        out = model(x, targets=x)
+        out.loss.backward()
         opt.step()
     model.eval()
     return model

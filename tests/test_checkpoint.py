@@ -52,10 +52,10 @@ def test_load_missing_dir_raises(tiny_cfg, tmp_path):
 def test_manager_latest(tiny_cfg, tmp_path):
     mgr = CheckpointManager(tmp_path / "ckpts")
     model, opt, sched = _model_and_optim(tiny_cfg)
-    mgr.save(10, model=model, optimizer=opt, scheduler=sched, step=10,
+    mgr.save(10, model=model, optimizer=opt, scheduler=sched,
              tokens_seen=0, config=tiny_cfg)
     assert mgr.latest() is not None
-    mgr.save(20, model=model, optimizer=opt, scheduler=sched, step=20,
+    mgr.save(20, model=model, optimizer=opt, scheduler=sched,
              tokens_seen=0, config=tiny_cfg)
     meta, _ = load_checkpoint(mgr.latest(), model, restore_rng=False)
     assert meta["step"] == 20
@@ -75,8 +75,11 @@ def _read_metrics(exp_dir):
 
 
 def test_resume_is_bit_exact(smoke_dataset, tmp_path):
-    """Run A: 6 uninterrupted steps.  Run B: 3 steps, then resume with a
-    fresh process state to 6.  Losses and weights must match exactly."""
+    """Run A: 6 uninterrupted steps.  Run B: crashes (non-interrupt
+    exception, e.g. power loss / OOM) during step 4 after the periodic
+    checkpoint at step 3, then resumes with a fresh process state to 6.
+    Losses and weights must match exactly.  Resuming means continuing the
+    SAME schedule: the step count must not change between sessions."""
     # ---- uninterrupted reference run --------------------------------
     ref_dir = tmp_path / "ref"
     ref_dir.mkdir()
@@ -87,19 +90,36 @@ def test_resume_is_bit_exact(smoke_dataset, tmp_path):
     _, summary_ref = _train_steps(cfg_ref, ref_dir, 6)
     ref_metrics = _read_metrics(ref_dir)
 
-    # ---- interrupted + resumed run ------------------------------------
+    # ---- crashed run: periodic checkpoint at 3, dies during step 4 ----
     exp_dir = tmp_path / "exp"
     exp_dir.mkdir()
     cfg_b = config_from_dict(smoke_dataset["config_dict"])
+    cfg_b.training.steps = 6                 # same horizon as the reference
     cfg_b.training.log_interval = 1
     cfg_b.training.eval_interval = 100
     cfg_b.training.checkpoint_interval = 3
-    _, _ = _train_steps(cfg_b, exp_dir, 3)          # phase 1: stops at 3
+    trainer_b = Trainer(cfg_b, experiment_dir=exp_dir)
+    original = trainer_b.model.forward
+
+    def crashing_forward(*args, **kwargs):
+        if not crashing_forward.done:
+            crashing_forward.calls += 1
+            if crashing_forward.calls == 4:   # during step 4
+                crashing_forward.done = True
+                raise RuntimeError("simulated crash")
+        return original(*args, **kwargs)
+
+    crashing_forward.calls = 0
+    crashing_forward.done = False
+    trainer_b.model.forward = crashing_forward
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        trainer_b.train()
     assert (exp_dir / "checkpoints" / "step_00000003").is_dir()
 
     # fresh process-like state before resume (different ambient RNG)
     torch.manual_seed(9999)
     cfg_c = config_from_dict(smoke_dataset["config_dict"])
+    cfg_c.training.steps = 6
     cfg_c.training.log_interval = 1
     cfg_c.training.eval_interval = 100
     cfg_c.training.checkpoint_interval = 100
@@ -122,6 +142,79 @@ def test_resume_is_bit_exact(smoke_dataset, tmp_path):
     for k, v in model_ref.state_dict().items():
         assert torch.allclose(v, model_res.state_dict()[k], atol=1e-6), \
             f"weights differ after resume: {k}"
+
+
+def test_mid_step_interrupt_rescue_is_exact(smoke_dataset, tmp_path):
+    """Ctrl+C in the middle of a step must save a rescue checkpoint that
+    references only fully completed steps and rolls RNG back to the last
+    clean boundary; resume from it must reproduce the uninterrupted
+    trajectory exactly (the interrupted step replays, its data draw is
+    not lost)."""
+    exp_dir = tmp_path / "exp"
+    exp_dir.mkdir()
+    cfg = config_from_dict(smoke_dataset["config_dict"])
+    cfg.training.steps = 6
+    cfg.training.log_interval = 1
+    cfg.training.eval_interval = 100
+    cfg.training.checkpoint_interval = 100  # the rescue ckpt is the only one
+
+    trainer = Trainer(cfg, experiment_dir=exp_dir)
+    original = trainer.model.forward
+    raised = {"done": False}
+    calls = {"n": 0}
+
+    def exploding_forward(*args, **kwargs):
+        # calls 1-3 = training steps 0-2; raise inside training step 3,
+        # after its batch draw consumed generator state but before it ran
+        calls["n"] += 1
+        if calls["n"] == 4 and not raised["done"]:
+            raised["done"] = True
+            raise KeyboardInterrupt
+        return original(*args, **kwargs)
+
+    trainer.model.forward = exploding_forward
+    summary = trainer.train()
+
+    tps = trainer.tokens_per_step()
+    assert summary["status"] == "INTERRUPTED"
+    assert summary["steps_completed"] == 3
+    assert summary["tokens_trained"] == 3 * tps
+
+    rescue = exp_dir / "checkpoints" / "step_00000003"
+    meta = json.loads((rescue / "checkpoint.json").read_text(encoding="utf-8"))
+    assert meta["step"] == 3
+    assert meta["tokens_seen"] == 3 * tps
+
+    # ---- uninterrupted reference over the same 6 steps ----------------
+    ref_dir = tmp_path / "ref"
+    ref_dir.mkdir()
+    cfg_ref = config_from_dict(smoke_dataset["config_dict"])
+    cfg_ref.training.log_interval = 1
+    cfg_ref.training.eval_interval = 100
+    cfg_ref.training.checkpoint_interval = 100
+    Trainer(cfg_ref, experiment_dir=ref_dir).train()
+    ref_metrics = _read_metrics(ref_dir)
+
+    # ---- resume from the rescue checkpoint to completion ---------------
+    cfg_r = config_from_dict(smoke_dataset["config_dict"])
+    cfg_r.training.steps = 6          # resume target: 3 -> 6
+    cfg_r.training.log_interval = 1
+    cfg_r.training.eval_interval = 100
+    cfg_r.training.checkpoint_interval = 100
+    trainer_r = Trainer(cfg_r, experiment_dir=exp_dir, resume=True)
+    assert trainer_r.start_step == 3
+    summary_r = trainer_r.train()
+    assert summary_r["steps_completed"] == 6
+    assert summary_r["tokens_trained"] == 6 * tps
+
+    # the resumed steps replay the reference trajectory exactly
+    resumed_metrics = _read_metrics(exp_dir)[-3:]
+    assert len(resumed_metrics) == 3
+    for i, (r, s) in enumerate(zip(ref_metrics[3:], resumed_metrics)):
+        assert abs(r["train_loss"] - s["train_loss"]) < 1e-6, \
+            f"rescue-resume diverged at step {i + 4}: " \
+            f"{r['train_loss']} vs {s['train_loss']}"
+        assert r["tokens_seen"] == s["tokens_seen"]
 
 
 def test_checkpoint_records_config_and_step(tiny_cfg, tmp_path):

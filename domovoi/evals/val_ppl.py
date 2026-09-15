@@ -30,8 +30,8 @@ class ValPPLEval:
                 x, y = val_data.get_batch(cfg.training.batch_size,
                                           cfg.training.context_length,
                                           device, gen)
-                _, loss = model(x, targets=y)
-                losses.append(loss.item())
+                out = model(x, targets=y)
+                losses.append(out.loss.item())
         mean = sum(losses) / len(losses)
         ppl = float(torch.exp(torch.tensor(mean)).item())
         return {

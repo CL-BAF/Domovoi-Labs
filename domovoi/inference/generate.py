@@ -111,14 +111,22 @@ def generate(
     t0 = time.perf_counter()
     out = model(x, use_cache=True)
     caches = out.caches
-    next_tok = _sample_next(out.logits[0, -1], temperature, top_k, top_p, gen)
     ttft = time.perf_counter() - t0
 
-    new_ids = [next_tok]
+    # a token sampled after a forward that leaves cache length L occupies
+    # sequence position L, so it is inside the context window only if
+    # L < ctx_len.  Every emitted token must live inside the window, hence:
+    #   prefill sample (position n_prompt) needs n_prompt < ctx_len, and
+    #   each decode sample needs cache_len + 2 <= ctx_len.
+    new_ids = []
+    if len(prompt_ids) < ctx_len:
+        next_tok = _sample_next(out.logits[0, -1], temperature, top_k, top_p, gen)
+        new_ids.append(next_tok)
+
     t1 = time.perf_counter()
     for _ in range(max_new_tokens - 1):
-        # respect context: stop before exceeding it
-        if caches[0][0].size(2) + 1 > ctx_len:
+        # stop before sampling a token that would live outside the window
+        if caches[0][0].size(2) + 2 > ctx_len:
             break
         x = torch.tensor([[next_tok]], dtype=torch.long, device=device)
         out = model(x, use_cache=True, caches=caches)

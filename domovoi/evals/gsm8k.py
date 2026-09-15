@@ -20,7 +20,10 @@ from ..inference.generate import generate
 DEFAULT_SUBSET = 100
 MAX_NEW_TOKENS = 64
 
-_NUM_RE = re.compile(r"-?\d+[\d,]*\.?\d*")
+# a number: optional sign, comma-grouped digits, optional decimal part.
+# The decimal part requires digits after the dot, so "7." extracts as "7"
+# and sentence-final periods never leak into the answer.
+_NUM_RE = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
 
 
 def extract_answer(text: str) -> Optional[str]:

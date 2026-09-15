@@ -42,7 +42,11 @@ def test_end_to_end_smoke(smoke_dataset, tmp_path):
     assert exp_dir.name == "DML-0001"
 
     # ---------- 2-3. train + checkpoint --------------------------------
-    trainer = Trainer(cfg, experiment_dir=exp_dir)
+    # pinned to CPU: this is the cheap CPU smoke test of the full pipeline
+    # (a GPU may be present on this machine; the e2e GPU path is exercised
+    # by the real DML-0001 run)
+    cpu = torch.device("cpu")
+    trainer = Trainer(cfg, experiment_dir=exp_dir, device=cpu)
     update_metadata(exp_dir, {"parameters": trainer.n_params,
                               "tokenizer": trainer.tokenizer.metadata()})
     summary = trainer.train()
@@ -69,7 +73,7 @@ def test_end_to_end_smoke(smoke_dataset, tmp_path):
 
     # ---------- 5. resume for one more step -----------------------------
     cfg.training.steps = 5
-    trainer_r = Trainer(cfg, experiment_dir=exp_dir, resume=True)
+    trainer_r = Trainer(cfg, experiment_dir=exp_dir, resume=True, device=cpu)
     assert trainer_r.start_step == 4
     summary_r = trainer_r.train()
     assert summary_r["status"] == "COMPLETED"
