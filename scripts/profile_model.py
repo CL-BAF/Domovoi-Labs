@@ -87,7 +87,8 @@ def main() -> int:
     if profile.get("checkpoint_size_mb") is not None:
         print(f"[profile] ckpt size    : {profile['checkpoint_size_mb']} MiB")
     print(f"[profile] decode tok/s : {inf['decode_tok_per_s_median']}")
-    print(f"[profile] ttft         : {inf['ttft_s_median'] * 1000:.1f} ms")
+    if inf["ttft_s_median"] is not None:
+        print(f"[profile] ttft         : {inf['ttft_s_median'] * 1000:.1f} ms")
     if inf.get("peak_vram_allocated_mb") is not None:
         print(f"[profile] peak VRAM    : {inf['peak_vram_allocated_mb']} MiB allocated, "
               f"{inf['peak_vram_reserved_mb']} MiB reserved")

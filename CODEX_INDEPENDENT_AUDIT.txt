@@ -1,0 +1,300 @@
+﻿DOMOVOI LABS — INDEPENDENT ARCHITECTURE AUDIT
+23 November 2026 | domovoi_recurrent_v1
+
+1. Executive summary and scope
+The shared-core implementation performs causal depth recurrence as intended on
+the tested CPU paths. Weight identity, causal prefix independence, valid
+incremental decoding and tied gradients passed independent checks. The main
+blockers are research integrity on resume and measurement validity. At 8K,
+22.75% is a theoretical reduction in logical BF16 weights plus logical cache
+against an equally deep control. This checkout has no evidence of an 8K
+capability or peak-memory gain. Prioritize a narrow pilot after the fixes below.
+
+2. Files inspected
+Specifications: README.md, RESEARCH.md, BASELINES.md, EVALS.md, ROADMAP.md,
+HANDOFF.md, ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt and
+docs/RECURRENT_ARCHITECTURE_RESEARCH.md. Source paths include domovoi/config.py,
+models/{__init__,baseline_transformer,domovoi_recurrent}.py,
+training/{trainer,optim,checkpoint}.py, inference/generate.py,
+profiling/{accounting,profiler}.py, datasets/{prepare,loader,tokenizer}.py,
+evals/{base,val_ppl,gsm8k,if_mini}.py and experiments/{registry,report}.py
+(the latter modules are under domovoi/). Entrypoints include scripts/train.py,
+scripts/plan_recurrent_experiments.py and the inference/profile/eval scripts.
+Tests emphasize tests/test_recurrent.py, tests/test_checkpoint.py and the full
+offline suite. Historical evidence consists of four DML-0001 files. No
+DML-0001 checkpoint, tokenizer or processed corpus is available locally.
+
+3. Environment and test conditions
+Windows CPU, project .venv Python 3.13.17, PyTorch 2.15.0+cpu, no CUDA in the
+build. Git was unavailable on PATH and the workspace had no .git directory.
+The pinned upstream comparison was GitHub commit
+5e76fc78bbe9a5c12690e84d7c29e558248e6feb, extracted outside the workspace.
+DML-0001 metadata records Python 3.13.14, torch 2.11.0+cu128, CUDA 12.8,
+RTX 2050 and source commit 898ef3d0c48a6f4d4fd1a0addc41d7a3b220d377.
+Winget installation and ZIP acquisition are historical reports. The local
+layout is consistent with a ZIP but does not establish how it was installed.
+Tests used temporary smoke data and checkpoints. No research training,
+external data/model download, GPU work or status write was performed.
+
+4. Claim verification
+01 PASS — pinned upstream suite 75 passed; upstream test files compared to
+   the workspace were byte-identical. GitHub commit above, tests/.
+02 PASS — workspace 138 passed, including bounded CPU smoke tests.
+03 PASS — tests/test_recurrent.py:51–476 collected and passed 63 cases;
+   parameterized cases count individually.
+04 PASS — domovoi/models/domovoi_recurrent.py:56–76 and
+   baseline_transformer.py:210–222. Independent pre-hooks observed real
+   parameter-object IDs in each expected schedule and exact unique counts.
+05 PASS — depth-one same-seed parameters matched for both orders, tying
+   settings and tested widths/configurations. Both inherit the same forward.
+   Scope is equal configuration and RNG, domovoi_recurrent.py:105–128 and
+   baseline_transformer.py:262–277. Distinguish builders from direct
+   constructors, which omit residual-projection rescaling.
+06 PASS — order-of-magnitude agreement under valid caches on CPU. Independent
+   max absolute logits delta 1.1921e-7 FP32 and 2.2204e-16 FP64 over 96
+   chunking cases each. tests/test_recurrent.py:305–357 also checks greedy
+   generation. The original 1.8e-7 observation is environment-specific.
+07 PASS — independent gradients of reused block parameters matched the sum
+   across independent unrolled copies, max absolute FP64 delta 6.94e-18.
+   tests/test_recurrent.py:239–255 checks gradient presence; the new check
+   checks values. Neither test establishes trained stability.
+08 PASS — ordinary valid-input behavior. Old and new baseline same seed
+   state, logits, loss and prefill cache matched bitwise in train/eval with
+   tied/untied weights and nonzero dropout. baseline_transformer.py:160–222
+   changes dispatch and malformed-cache handling. CUDA equivalence untested.
+09 PASS for the four available tracked artifacts — identical to the pinned
+   snapshot and unchanged across the audit. Saved checkpoints NOT VERIFIED
+   (.gitignore:15–16). DML-0001 metadata still says RUNNING. Its last metrics
+   record is step 520 of 3000 and 4,259,840 tokens.
+10 PASS for source coverage — all 12 source sections at
+   ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt:199–1708 cover all added/changed
+   nonblank lines against the pinned control. All 694 numbered quotations
+   match after stripping whitespace. Coverage does not establish explanation
+   accuracy. The separate research prose was reviewed as design documentation.
+11 PASS for labeling — profiling/profiler.py:145–155 separates measured values
+   and analytic estimates; profiling/accounting.py:31–60 models logical cost.
+   Findings DML-A03/A04 explain when the reported values mislead.
+12 NOT VERIFIED as an unrestricted historical claim. The workspace has no
+   recurrent training, benchmark or profile artifact. The only run evidence
+   is the conventional DML-0001 partial run and descriptions at
+   docs/RECURRENT_ARCHITECTURE_RESEARCH.md:1–5 and :318–323. CPU tests include
+   short synthetic training. No full run or benchmark was performed here.
+
+5. Findings
+DML-A01 | HIGH | Confirmed | High confidence
+  domovoi/training/trainer.py:76–127; training/checkpoint.py:124–162;
+  scripts/train.py:58–111.
+  Same-shape recurrence changes pass checkpoint load. The trainer builds
+  from CLI config, validates tensor keys/shapes during load and warns about
+  changed steps. It never compares the saved architecture schedule to the
+  active one. Reproduce with the checkpoint probe in the log: a depth-2 cycle
+  save loaded into depth-3 sequence and changed logits by 0.177509. Checkpoint
+  inference reconstructs the saved config and passed an exact round trip.
+  A missing resume checkpoint also falls back to step zero. An explicit
+  experiment directory bypasses allocation, even for a fresh run. Mixed
+  histories could pass as a single trajectory or write into DML-0001.
+  Require explicit fresh/resume/fork modes, fail closed before any writes,
+  validate resolved config and data hashes, and enforce a single writer.
+  Record deviations and give forks fresh run IDs.
+
+DML-A02 | MEDIUM | Confirmed | High confidence
+  domovoi/models/baseline_transformer.py:194–220 and :78–99.
+  A heterogeneous cache uses the first slot for positions and permits
+  different histories in other slots. Shortening slot 1 from 5 to 2
+  produced a 0.00435843 max logit error with no exception; an empty cache
+  caused IndexError before length validation. Normal generate uses its own
+  consistent cache. Validate slot count first, then batch/head/dim/length,
+  device and dtype. Bind reusable cache objects to schedule and model
+  identity if callers can switch either. Same-shaped slots currently have
+  no provenance, so experimental cache reuse needs additional checks.
+
+DML-A03 | HIGH | Confirmed defects and measured CPU allocation | High confidence
+  domovoi/models/baseline_transformer.py:73–80 and :223–225;
+  domovoi/inference/generate.py:28–37, :106–120 and :133–170;
+  domovoi/profiling/profiler.py:71–99 and :105–132.
+  Prefill K/V are views of fused QKV and retain Q storage. The independent
+  probe counted 43,200 underlying bytes for 28,800 logical K/V bytes. Decode
+  concatenates every K/V and keeps the old full cache live during forward.
+  The profiler has a reportable dtype mismatch: analytical weights and KV
+  assume 2 bytes while checkpoint construction and loading produce FP32 by
+  default. Timing samples perf_counter after launching CUDA prefill, before
+  sampling synchronizes, so GPU TTFT is not a completed first-token latency.
+  Each generate resets peaks and the aggregate reads only the last run.
+  Context strings may undershoot targets (a word tokenizer produced 9 for
+  both 16 and 32); exact-full prompts provide zero decode tokens. These are
+  disqualifying for a memory/speed frontier. Use exact input IDs, reserve
+  decode headroom, report dtype/backend and actual lengths, synchronize or
+  use CUDA events, take peaks across repeats, measure allocated/reserved and
+  device-wide usage, and account for all transient logits/cache allocations.
+  Test static cache and final-position-only prefill logits separately.
+
+DML-A04 | HIGH | Confirmed design gap | High confidence
+  scripts/plan_recurrent_experiments.py:34–68, :79–103;
+  docs/RECURRENT_ARCHITECTURE_RESEARCH.md:203–292;
+  domovoi/datasets/loader.py:44–50.
+  Default matrix fixes seed and uses tinyshakespeare. Its 24,576,000 sampled
+  tokens imply about 80 corpus-equivalents, with overlapping random windows.
+  Same analytical forward/backward matmuls do not match optimizer updates or
+  wall time. Matching parameters and tokens leaves large FLOP differences.
+  Multiple-seed estimates and a memory-matched conventional frontier are
+  absent. Twice pooled seed SD is not a test or uncertainty interval for a
+  paired effect. Reproduce using planner stdout and inspect the cloned base
+  fields. Freeze matched data streams and evaluation, report actual resource
+  measurements, predeclare paired effects/thresholds, and tune symmetrically.
+  With three pairs, label outcomes screening evidence and expect inconclusive
+  intervals. Generated configs inherit an explicit output ID if present in a
+  custom base and overwrite same-named arm YAML output files. Clear the ID,
+  use unique seed/arm manifests, and require explicit overwrite for plans.
+
+DML-A05 | MEDIUM | Confirmed trust boundary | High confidence
+  domovoi/training/checkpoint.py:124–162, :176–185.
+  Resume deserializes pickle-backed RNG/optimizer/scheduler/scaler state with
+  weights_only=False. Source inspection establishes the boundary. Resume
+  from trusted artifacts only; use restricted tensor/primitive state formats
+  and verify provenance. Inference uses safetensors, but both loaders waive
+  missing lm_head.weight even for an untied config. Reproduce on a disposable
+  untied checkpoint with that tensor absent and expect a randomly initialized
+  output head to survive load; this path was identified by inspection.
+  Waive only the intentional tied alias.
+
+DML-A06 | MEDIUM | Confirmed by inspection | High confidence
+  domovoi/experiments/registry.py:25–56, :66–111 and :115–122;
+  domovoi/training/checkpoint.py:56–98, :196–223.
+  Concurrent allocation can lose the mkdir race (fails without overwriting),
+  while concurrent metadata read-modify-write can lose updates. Four-digit
+  allocation reaches an invalid DML-10000 after DML-9999. Checkpoint backup
+  recovery assumes a single writer and conventional step directories.
+  Reproduce via fixed colliding IDs in an isolated temporary root or by
+  interleaving two metadata updates between read and write. Reserve IDs
+  atomically with retry, define ID rollover, serialize run mutations and
+  make metadata replacement atomic. Keep recovered/partial artifacts auditable.
+
+DML-A07 | MEDIUM | Confirmed metric limitations by inspection | High confidence
+  domovoi/evals/base.py:47–63 and :85–111; evals/val_ppl.py:38–56;
+  domovoi/training/trainer.py:147–168.
+  Multiple choice tokenizes context and answer separately, risking different
+  token boundaries from the concatenated string, then uses character-length
+  normalization. Context overflow lacks an explicit task-level policy.
+  Fixed sampled validation windows overlap and are suitable for progress,
+  while final evidence should be document-held-out token-weighted NLL.
+  Compare joint vs separate encoding for boundary-sensitive strings and
+  test context lengths near the cap. Freeze exact formatting and answer
+  scoring against a reference harness; log skipped/truncated examples and
+  precision. Reserve benchmark sets and run contamination checks.
+
+DML-A08 | LOW | Confirmed by inspection | High confidence
+  domovoi/config.py:132–187; models/domovoi_recurrent.py:56–63;
+  profiling/accounting.py:22–57; pyproject.toml:9–21.
+  YAML recurrence validation is stronger than the direct constructor;
+  recurrence_schedule(2, True, "cycle") accepts a boolean as one iteration.
+  Huge legal depths allocate a full schedule and can exhaust resources.
+  Accounting assumes biased blocks, dense MHA and the config as truth.
+  active_per_token counts total, an acceptable dense-model convention if
+  documented, but untied input embeddings and position embeddings only look
+  up rows. Verify supported versions in a locked environment, validate
+  backend-compatible types/dimensions and distinguish accessed rows from
+  unique and applied block parameters. Lower-bound dependencies alone
+  cannot reproduce CUDA or determinism results.
+
+6–8. Mathematical architecture, cache and memory
+Let n be stored blocks, r repeats, A=n*r, d width, f MLP width, V vocabulary,
+C positional capacity, T actual length and B batch size. x0=E[token]+P[pos].
+Each step applies x'=x+Attention(LN1(x)), then x_next=x'+MLP(LN2(x')).
+Cycle repeats the stack, sequence repeats each block before advancing.
+This is fixed-depth recurrent computation over residual states, implemented
+as repeated ordinary blocks. Different activations reach the same weights.
+Training autograd retains per-application states. Across tokens the only
+carried state is KV. Sharing parameters does not justify sharing these states.
+Pre-LN gives an identity residual gradient path; it does not bound products
+of correlated Jacobians. Sharing can align gradient contributions or cause
+cancellation. Projection initialization scales by 1/sqrt(2A), which need
+not stabilize repeated correlated updates. Track pre/post-clip gradients,
+residual norm, update-to-weight ratio, cosine similarity between iterations
+and early-exit loss. Final-head early-exit metrics are diagnostics since that
+head was optimized for final depth. Saturation and capacity limits remain
+hypotheses.
+
+Cache slot j must store K/V from the state entering application j, even when
+two slots use the same block. Causality follows by induction through depth:
+position p uses only prefix states through p; positionwise norms and MLPs
+preserve the property. Fresh prefill uses causal SDPA, singleton decode uses
+all available keys, and chunk query i allows keys <= prefix+i. Position IDs
+start at prefix length. Independent chunkings include full length, length 1,
+mixed chunks and final context boundary. Existing tests cover greedy boundary
+behavior including empty/overlength prompts in the overall suite. Valid
+caching passed. The malformed-cache counterexample is DML-A02.
+
+Block parameters P=4d²+2df+9d+f, including two affine norms and five d plus
+f linear biases. Unique U=(V+C)d+2d+nP+(untied?Vd:0); applied count replaces
+nP by AP. For an attended length L the per-query forward matmul estimate
+is A(8d²+4df+4dL)+2Vd. Prefill multiplies the projection/head term by BT
+and uses B*T*(T+1)/2 valid attention pairs per layer. Dense math kernels
+may compute a full T×T rectangle; softmax, normalization, GELU, memory
+traffic and backend effects are omitted. Decode has L≈T and concatenation
+adds O(BATd) copying per step. Backward roughly adds 2x forward matmuls,
+ignoring optimizer, clipping and recomputation. CPU validation checked
+the formulas, without hardware FLOP counters.
+
+Logical KV is 2*B*A*T*d*bytes_per_KV. Training saved activations include
+O(BAT(d+f)) and possibly O(BAhT²) attention storage for h heads with a
+materializing backend; fused SDPA can avoid the latter. Logits scale BTV.
+Training memory adds weights, gradients and AdamW moments (roughly 16 bytes
+per parameter for FP32 weights, gradients and both moments) plus AMP casts,
+allocator workspaces and temporary buffers. Activation checkpointing trades
+extra compute for saved activations. Inference peak includes weights, KV,
+logits, per-block workspace, transient old/new cache, sampling and allocator
+and process overhead. Reducing physical weights can help bandwidth or
+resident storage, but recurrence still executes each application.
+
+8K example, tied embeddings, d=640, f=1728, V=4096, A=16, B=1,
+learned position table resized to 8192 and all storage BF16:
+  B16    69,589,248 params 132.73096 MiB weights 320 MiB KV 452.73096 total
+  R02x8  15,581,056 params  29.71851 MiB weights 320 MiB KV 349.71851 total
+  Difference 103.01245 MiB, 22.75% of B16.
+Fused prefill backing allocations alone can add another 160 MiB to either
+cache. With that shared overhead the fraction falls to about 16.81% before
+logits/workspace. 8K×4096 logits add up to 64 MiB in BF16 or 128 MiB in
+FP32. Standard checkpoint inference uses FP32 and can approximately double
+logical tensor bytes relative to this example. Equal overhead dilutes a
+percentage and can preserve the absolute weight delta. Different peak
+allocation behavior or throughput can erase practical advantage. Only
+same-backend measured peak and speed can decide.
+
+9–13. Experimental fairness, reproducibility, fixes and research value
+See docs/CODEX_ARCHITECTURE_REVIEW.md for the pilot, dataset and positional
+migration. At context 512, B02 and R02x4 store the same count but estimated
+training FLOPs/token differ by about 3.3x, including the shared output head.
+B08 and R02x4 match approximate matmul work and differ in optimizer work,
+weight capacity and potentially bandwidth. Use AdamW matrix-only decay
+and cosine/warmup consistently (training/optim.py:16–47). Parameter-count
+matching does not match gradient statistics. Same integer seed gives an
+independent data generator but is not matched initialization across shapes,
+because module allocation consumes RNG before explicit initialization.
+At equal effective depth, residual projection scaling matches; at equal
+stored count and different A it does not. Document initialization and add
+a matched initialization sensitivity run if it changes the conclusion.
+
+Preserve DML-0001 as history. Use clean versioned source plus dirty-diff
+hash, environment/package lock, CUDA runtime/driver/backend and dtype,
+tokenizer/packed split hashes and RNG provenance for future runs. Present
+exact same-environment resume separately from cross-platform numerical
+equivalence. Existing CPU resume tests cover ordinary and injected
+forward/evaluation interruption, but not interruption during a partially
+applied optimizer update. Review trainer.py:251–272, :312–323 for that risk:
+RNG rollback alone cannot undo partial parameter mutations. Use a last
+committed full checkpoint as the recovery authority and reconcile metric
+rows after restart. No verified dependency vulnerability is reported.
+
+The baseline subclass hook is small and reuses masking logic productively.
+Separate the immutable baseline control from experimental entrypoints at
+the revision or test-fixture level. Shared tested leaf modules are reasonable.
+A duplicated attention implementation would add drift. A new execution path
+is justified when cache semantics, adaptive schedules or positions diverge.
+
+14. Final decision
+APPROVE AFTER FIXES
+The CPU evidence supports the core design. Resume integrity, production
+measurement fidelity and controlled comparisons must be fixed before the
+first research run. An affirmative pilot would justify a longer-context
+follow-up, with claims restricted to the tested scale and hardware.
+

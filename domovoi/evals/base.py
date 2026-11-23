@@ -156,12 +156,16 @@ TASKS = {
 }
 
 from .gsm8k import GSM8KSubsetEval       # noqa: E402
+from .full_split_nll import FullSplitNLLEval  # noqa: E402
 from .if_mini import IFMiniEval           # noqa: E402
 from .val_ppl import ValPPLEval          # noqa: E402
 
 TASKS["gsm8k"] = GSM8KSubsetEval
 TASKS["if_mini"] = IFMiniEval
 TASKS["val_ppl"] = ValPPLEval
+TASKS["val_nll"] = FullSplitNLLEval("val")
+TASKS["test_nll"] = FullSplitNLLEval("test")
+TASKS["val_nll_exits"] = FullSplitNLLEval("val", early_exits=True)
 
 DEFAULT_TASKS = ["val_ppl", "hellaswag", "arc_challenge", "piqa",
                  "winogrande", "gsm8k", "if_mini"]
@@ -178,6 +182,7 @@ def run_evals(
     model, tokenizer, device, tasks: list[str], limit: Optional[int] = None,
     training_config=None, data_root: pathlib.Path = EVAL_DATA_ROOT,
     n_val_batches: Optional[int] = None,
+    checkpoint_meta: Optional[dict] = None,
 ) -> dict:
     """Run a set of eval tasks; returns machine-readable results dict.
     n_val_batches=None lets val_ppl default to the training config's
@@ -193,11 +198,17 @@ def run_evals(
             res = task.run(model, tokenizer, device,
                            training_config=training_config,
                            n_batches=n_val_batches)
+        elif isinstance(task, FullSplitNLLEval):
+            if training_config is None:
+                raise ValueError("Full-split NLL requires the checkpoint training config.")
+            if limit is not None or n_val_batches is not None:
+                raise ValueError("Full-split NLL does not support evaluation limits.")
+            res = task.run(model, tokenizer, device, training_config, checkpoint_meta)
         else:
             res = task.run(model, tokenizer, device, limit=limit,
                            data_root=data_root)
         results[name] = res
-        metric = res.get("acc", res.get("val_loss"))
+        metric = res.get("acc", res.get("val_loss", res.get("nll")))
         print(f"[eval] {res.get('display_name', name)}: {metric} "
               f"(n={res.get('n', '?')})", flush=True)
     return {"tasks": results}

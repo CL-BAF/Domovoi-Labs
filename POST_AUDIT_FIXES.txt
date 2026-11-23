@@ -1,0 +1,1187 @@
+==============================================================================
+ DOMOVOI LABS - POST-AUDIT CORRECTNESS REMEDIATION
+ domovoi_recurrent_v1 | written 2026-11-23
+ POST_AUDIT_FIXES.txt
+==============================================================================
+
+Inputs: CODEX_INDEPENDENT_AUDIT.txt, CODEX_VERIFICATION_RESULTS.txt,
+docs/CODEX_ARCHITECTURE_REVIEW.md (decision: APPROVE AFTER FIXES).
+
+Rule followed: every audit finding was treated as a claim to check.  Each
+defect below was REPRODUCED against the audited code before any edit, and
+each fix has regression tests that were shown to FAIL when the old
+behaviour is put back.
+
+Environment for everything in this file: Windows 11, project .venv,
+Python 3.13.17, torch 2.15.0+cpu (CPU only, torch.cuda.is_available() ==
+False).  An RTX 5080 is installed (nvidia-smi: 16303 MiB total, about
+3048 MiB already in use by other processes when checked), but the project
+environment has no CUDA build of torch.  NO CUDA test was run (see Fix 3,
+limitations).  No training, no dataset download, no GPU work.
+
+------------------------------------------------------------------------------
+REPRODUCIBLE RECORD OF ALL MODIFICATIONS
+------------------------------------------------------------------------------
+There is no git repository on this machine, so the record is a snapshot plus
+scripts:
+
+  post_audit/pre_fix/                 byte copy of domovoi/, scripts/, tests/
+                                      and ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt
+                                      exactly as Codex audited them, taken
+                                      before the first edit.  Diff any file
+                                      against it to see every change.
+  post_audit/scripts/repro_audit.py   reproduction of DML-A01/A02/A03
+  post_audit/repro_before.txt         its output on the audited code
+  post_audit/repro_after.txt          its output after the fixes
+  post_audit/scripts/probeA-D.py      Codex's four probes, bodies copied
+                                      verbatim from CODEX_VERIFICATION_RESULTS.txt
+  post_audit/codex_probes_after.txt   their output after the fixes
+  post_audit/scripts/mutate_post_audit.py + post_audit/mutation_results.txt
+                                      put each old behaviour back and count
+                                      failing tests
+  post_audit/scripts/check_doc.py     quote/coverage checker for
+                                      ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt
+  post_audit/scripts/baseline_equivalence.py
+                                      original-vs-current control comparison
+  post_audit/README.md                how to re-run each of these
+
+The pinned upstream source Codex compared against (GitHub commit
+5e76fc78bbe9a5c12690e84d7c29e558248e6feb) was still extracted on this
+machine; its files hash-match the ZIP this generation started from (only a
+.pyc differed), so the same reference was used.
+
+Files changed by this remediation (relative to post_audit/pre_fix/):
+  NEW       domovoi/models/kv_cache.py
+  NEW       domovoi/models/signature.py
+  NEW       tests/test_post_audit.py
+  MODIFIED  domovoi/models/baseline_transformer.py   (control: 4 new code
+                                                      lines + 2 comments;
+                                                      15 lines removed)
+  MODIFIED  domovoi/models/domovoi_recurrent.py
+  MODIFIED  domovoi/models/__init__.py
+  MODIFIED  domovoi/training/checkpoint.py
+  MODIFIED  domovoi/training/trainer.py
+  MODIFIED  domovoi/inference/generate.py
+  MODIFIED  domovoi/profiling/profiler.py
+  MODIFIED  domovoi/profiling/accounting.py
+  MODIFIED  scripts/train.py
+  MODIFIED  scripts/plan_recurrent_experiments.py
+  MODIFIED  scripts/generate.py
+  MODIFIED  scripts/profile_model.py
+  MODIFIED  pyproject.toml   (torch>=2.2 -> torch>=2.4; see Fix 2, item 4)
+  Documentation: ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt (updated),
+  POST_AUDIT_FIXES.txt (this file), docs/DOMOVOI_PILOT_PLAN.md (new),
+  docs/RECURRENT_ARCHITECTURE_RESEARCH.md (one superseding note).
+NOT modified: experiments/DML-0001/* (SHA-256 identical before and after,
+listed at the end), configs/*.yaml, all pre-existing tests, README,
+RESEARCH, ROADMAP, HANDOFF, BASELINES, EVALS.  No experiment status was
+changed.  M1 is not marked complete.
+
+Line-by-line explanations of every changed line are in
+ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt Part B (sections B.1-B.20; post-
+audit material is marked [POST-AUDIT] or "POST-AUDIT CHANGES").  The
+summaries below give the line numbers.
+
+
+==============================================================================
+FIX 1 - CHECKPOINT AND RESUME MUST NOT CHANGE THE COMPUTATION GRAPH
+         (Codex DML-A01, HIGH; part of DML-A05)
+==============================================================================
+
+1. What Codex found
+   A checkpoint could be loaded into a model with a different recurrence
+   schedule whenever tensor names and shapes matched.  Codex's probe B
+   saved a depth-2 "cycle" model and loaded it into a depth-3 "sequence"
+   model: accepted, logits changed by 0.177509.  The trainer built the
+   model from the command-line config and never compared it with the
+   checkpoint's.  A missing resume checkpoint fell back to step 0, and an
+   explicit experiment directory bypassed ID allocation even for a fresh
+   run, so mixed histories could be written into an existing experiment
+   such as DML-0001.  (DML-A05, same area: both loaders tolerated a
+   missing lm_head.weight even for untied models.)
+
+2. How the defect was reproduced (post_audit/repro_before.txt)
+   - Codex's probe, re-run: depth-2 cycle checkpoint loaded into depth-3
+     sequence: "ACCEPTED; logit delta 0.17750859260559082".
+   - New case: the same recurrent checkpoint loaded into a plain
+     2-block baseline (identical tensor layout): "ACCEPTED; delta
+     0.20899996161460876".  A recurrent model's weights were silently run
+     as a conventional Transformer.
+   - By inspection of trainer.py: `if resume and ... latest() is not None:
+     load ... elif resume: print(WARNING ... starts from step 0)`; and of
+     scripts/train.py: `finally: ... set_status(exp_dir, status)` runs for
+     ANY exception.
+
+3. Why the problem occurred
+   The checkpoint format described weights (safetensors names/shapes) and
+   stored the config, but nothing compared the stored config with the
+   model receiving the weights.  Weight sharing makes this a real hazard:
+   n_layers counts STORED blocks, so every recurrence depth and order of a
+   2-block model, and the 2-block baseline, share one state_dict layout.
+   Shape checks cannot distinguish computation graphs that differ only in
+   how stored blocks are wired.
+
+4. Exactly what code was changed
+   domovoi/models/signature.py (new, 68 lines)
+   domovoi/models/baseline_transformer.py:139, domovoi_recurrent.py:68
+     (architecture_id class attributes)
+   domovoi/training/checkpoint.py:30, 38-96, 147-149, 187-189, 194,
+     234, 237-239, 243
+   domovoi/training/trainer.py:19, 27, 30, 33-34, 99-101, 110-112,
+     133-172 (the old warning branch was removed)
+   scripts/train.py:54-59, 71, 74, 119-123
+   domovoi/models/__init__.py:19, 43
+
+5. What each changed line does and why it is necessary
+   signature.py
+     19-21   _FIELDS: every setting that changes how weights are wired:
+             architecture, vocab, context length, width, stored blocks,
+             heads, MLP width, tying, depth, order.  dropout is excluded
+             (training noise, not the function).
+     24-42   model_signature(model): those fields read from the INSTANCE
+             (model.architecture_id, model.cfg) plus the explicit
+             application_schedule() and its length.  It describes what the
+             model will actually compute.
+     45-58   config_signature(section): the same fields from a config.  A
+             stored dict is normalised through ModelSection, so legacy
+             checkpoints without recurrence keys get depth 1/cycle (what
+             they were).  The schedule comes from recurrence_schedule().
+     61-68   signature_differences(): one "field: a=X, b=Y" line per
+             difference.  Every error message below is built from it.
+   baseline_transformer.py:139 / domovoi_recurrent.py:68
+             architecture_id = registry name, as a class attribute: no
+             parameters, no state_dict entry, no effect on computation.
+             Needed because a 2-block baseline and a 2-block recurrent
+             model cannot otherwise be told apart from the instance.
+   checkpoint.py
+     38-43   read_checkpoint_meta(): read checkpoint.json only, so callers
+             can validate before opening tensors.
+     46-67   saved_signature(): the signature the checkpoint was saved
+             under.  No stored config => refuse (fail closed).  New
+             checkpoints carry an explicit signature; if re-deriving it
+             from the stored config with today's code gives something
+             else, the meaning of a setting changed in code => refuse as
+             "internally inconsistent".  Legacy checkpoints use the
+             config-derived signature.
+     70-84   verify_checkpoint_architecture(): compares the saved
+             signature with the TARGET model's; any difference raises
+             CheckpointError listing each field plus the three correct
+             actions (resume with the checkpoint's own config.model / new
+             experiment / build_model_from_checkpoint for inference).
+     87-96   _check_loaded_keys(): shared key check.  lm_head.weight may be
+             missing only for TIED models (DML-A05).
+     147-149 save_checkpoint writes "model_signature" (with the explicit
+             schedule and effective depth) into checkpoint.json.
+     187-189 load_checkpoint verifies BEFORE load_state_dict, so a refused
+             load leaves the target model untouched.  (The final re-read
+             of checkpoint.json was removed: meta is read here.)
+     194     load_checkpoint uses the shared key check.
+     234, 237-239, 243
+             build_model_from_checkpoint (inference/eval/profiling)
+             rebuilds from the stored config as before, then verifies the
+             rebuilt model against the stored signature, then the shared
+             key check.
+   trainer.py
+     99-101  The resume decision is made before CheckpointManager is
+             constructed (its constructor runs mkdir) and before anything
+             is written.
+     110-112 Only a pre-validated checkpoint is loaded.  The removed
+             `elif resume:` branch used to print a warning and train from
+             step 0.
+     133-172 _resolve_resume_checkpoint():
+               - fresh run + existing checkpoints => refuse (mixed
+                 histories);
+               - resume + no checkpoint => refuse (no silent restart);
+               - resume + ANY difference in the complete model section
+                 (dropout included), compared after ModelSection
+                 normalisation => refuse with the differing fields.
+             Training-section changes (e.g. a longer training.steps) stay
+             allowed with the existing warning, because existing resume
+             workflows and tests rely on that.
+   scripts/train.py
+     54-59   --experiment-dir without --resume is refused before anything
+             is created.  Its only legitimate use is resuming.
+     71, 74  trainer_ready records whether the Trainer (and therefore the
+             resume pre-flight) succeeded.
+     119-123 If a resume was refused, the finally: block does NOT call
+             set_status.  Before, a REFUSED resume of a RUNNING experiment
+             would have stamped it FAILED, i.e. the protection would itself
+             have modified a historical status.  Fresh runs keep the old
+             behaviour (their own new experiment is marked FAILED).
+
+6. Tests that verify the correction (tests/test_post_audit.py)
+   test_checkpoint_records_explicit_schedule
+   test_changed_schedule_rejected_before_weights_load  x3 (cycle->sequence
+       with identical shapes; Codex's depth2-cycle->depth3-sequence;
+       depth 4->1); also asserts the target weights are unchanged
+   test_recurrent_checkpoint_into_same_shape_baseline_rejected
+   test_baseline_checkpoint_into_recurrent_rejected
+   test_legacy_baseline_checkpoint_still_loads (checkpoint.json rewritten
+       without signature and recurrence keys: loads into a baseline via
+       both loaders with bit-identical logits; refused by a recurrent model)
+   test_inconsistent_checkpoint_json_rejected
+   test_inference_rebuild_uses_saved_schedule
+   test_untied_checkpoint_missing_lm_head_rejected (DML-A05)
+   test_resume_with_different_model_config_rejected_without_writes x3
+       (order, depth, dropout; every file hashed before/after)
+   test_resume_without_checkpoint_fails_closed (nothing created)
+   test_fresh_run_into_dir_with_checkpoints_refused (no writes)
+   test_resume_with_same_model_config_still_works
+   test_train_script_refused_resume_leaves_experiment_untouched (real
+       scripts/train.py subprocess against a RUNNING experiment directory:
+       exit 1, every file byte-identical, status still RUNNING)
+   test_train_script_experiment_dir_requires_resume
+   All existing resume tests in tests/test_checkpoint.py still pass
+   (bit-exact resume, mid-step and in-validation interrupt rescue,
+   completed-run resume).
+   Mutation check: disabling verify_checkpoint_architecture fails 7 tests;
+   restoring the lax resume fails 5; restoring the lm_head waiver fails 1.
+   Codex probe B after the fix: the changed-schedule load raises
+   CheckpointError listing recurrence_depth, recurrence_order,
+   application_schedule [0,1,0,1] vs [0,0,0,1,1,1] and effective_depth.
+
+7. Remaining limitations
+   - [RESOLVED in the re-review round, see RR1 below] Data provenance was
+     not validated on resume.
+   - [RESOLVED in the re-review round] No single-writer lock.
+   - No explicit "fork" mode; forking a checkpoint into a new experiment
+     must be done by hand.
+   - [RESOLVED in the re-review round; this round's description was wrong]
+     The preflight called CheckpointManager.latest(), whose crash-recovery
+     rename ran BEFORE validation.  This text said it was "the only write
+     the pre-flight can cause", but it also meant a REFUSED resume could
+     modify the directory, as Codex reproduced.
+   - Resume deserialises optimizer/scheduler/RNG state with pickle
+     (weights_only=False).  Resume only from trusted artifacts (DML-A05,
+     not changed).
+   - DML-0001's own checkpoints are not on this machine.  Legacy loading
+     was tested on a checkpoint rewritten into the legacy format, not on
+     the real files.
+
+
+==============================================================================
+FIX 2 - STRICT KV-CACHE VALIDATION   (Codex DML-A02, MEDIUM)
+==============================================================================
+
+1. What Codex found
+   A heterogeneous cache used slot 0 for positions and accepted other
+   slots with different histories.  Shortening slot 1 from 5 to 2 changed
+   logits by 0.00435843 (FP64) with no exception.  An empty cache raised
+   IndexError before the length check.  Same-shaped slots carry no
+   provenance.
+
+2. How the defect was reproduced (post_audit/repro_before.txt, FP32,
+   smoke-size depth-2 recurrent model)
+   - slot 1 shortened to 2 positions: ACCEPTED, delta 0.0561
+   - slot 2 replaced by None (found here, not in the Codex report):
+     ACCEPTED, delta 0.1187.  That application attended to the new tokens
+     only.
+   - empty list: IndexError
+   - wrong head count, wrong batch, float64 slot, k/v length mismatch,
+     input batch != cache batch: RuntimeError from deep inside attention,
+     no indication which slot or why.
+   - Provenance gap, by construction: a depth-2 "cycle" cache [0,1,0,1]
+     and a depth-2 "sequence" cache [0,0,1,1] have identical shapes.
+
+3. Why the problem occurred
+   forward() derived the positional offset from caches[0][0].size(2) and
+   then handed each slot to its block without checking it.  Inside
+   attention a shorter slot is not an error: keys are concatenated and the
+   mask is built from that slot's own length, so the application silently
+   attends to a different history while positions follow slot 0.  With
+   recurrence there are A slots instead of n_layers, which widens the gap.
+
+4. Exactly what code was changed
+   domovoi/models/kv_cache.py (new, 140 lines)
+   domovoi/models/baseline_transformer.py:33, 199-201, 210 (the 10 lines
+     that computed prefix_len and checked the context bound, plus the
+     5-line entry-count check, were removed)
+   domovoi/models/__init__.py:18, 42
+   pyproject.toml:12  torch floor raised from 2.2 to 2.4.  kv_cache.py:47-48
+     use torch.is_autocast_enabled(device_type) / torch.get_autocast_dtype,
+     which to my understanding first appeared in torch 2.4 (not checked
+     against release notes offline; executed only on 2.15).  Raising the
+     floor was chosen over an untestable version fallback.
+
+5. What each changed line does and why it is necessary
+   kv_cache.py
+     29-31   CacheValidationError(ValueError): specific, but still caught by
+             every existing `except ValueError` / pytest.raises(ValueError).
+     34-41   ApplicationCache(list): the list forward() returns, plus a
+             weak reference to the producing model and the schedule tuple.
+             It is a real list, so all existing callers work unchanged.
+     44-49   _expected_dtype(): autocast dtype under autocast, else the
+             weight dtype, i.e. what new K/V will be in this forward.
+     56-58   idx must be (batch, T) with T >= 1.
+     61-64   None => prefix 0; otherwise full validation.
+     65-68   Context bound with the original message: prefix + T <=
+             context_length (the learned position table has no rows
+             beyond it).
+     73-81   Container type, then entry count == number of APPLICATIONS,
+             checked before any slot is indexed (fixes the IndexError).
+     82-86   A cache produced by another model instance is refused.
+     87-91   A cache produced under another application schedule is
+             refused: the recurrence-iteration mapping check.
+     93-95   All-None list = "no prefix" (old behaviour kept).
+     96-100  Mixed None/K-V list refused.
+     102-107 Reference values: batch, heads, head_dim, device, dtype.
+     108-109 Every error names the slot and the stored block applied there.
+     110-118 Each entry is a (k, v) pair of 4-D tensors with k.shape ==
+             v.shape.
+     119-125 Batch matches the new tokens; heads and head_dim match the
+             model.
+     126-131 Every slot has the same cached length (THE Codex defect).  This
+             also makes the positional offset well defined.
+     132-134 Device compatibility.
+     135-139 dtype compatibility (no silent type promotion).
+     140     Returns the verified common prefix length.
+   baseline_transformer.py
+     33      import of the validator.
+     199-201 prefix_len = validate_caches(self, idx, caches) replaces the
+             slot-0 read and the context check.
+     210     forward() returns an ApplicationCache instead of a bare list.
+   For valid caches the returned prefix, and therefore the computation, is
+   identical.  The control was re-verified bit-exact against the pinned
+   upstream file: Codex probe C ("upstream exact: tie x mode = 4", dropout
+   0.2, train and eval) and post_audit/scripts/baseline_equivalence.py (3
+   configurations including baseline_small: state_dict, uncached logits,
+   cached prefill+extend+10 steps and caches all torch.equal).
+
+6. Tests that verify the correction
+   test_malformed_cache_rejected x17: empty list, too few, too many, None
+       hole, not a list, not a pair, not tensors, 3-D, k/v shape mismatch,
+       shorter slot, longer slot, wrong heads, wrong head_dim, wrong batch,
+       wrong dtype, mixed k/v dtype, wrong device (meta tensors)
+   test_cache_errors_are_value_errors_and_name_the_slot
+   test_input_batch_must_match_cache, test_empty_input_rejected
+   test_context_boundary_with_cache (exactly full is fine; +1 rejected)
+   test_cache_from_other_model_rejected
+   test_cache_from_other_schedule_rejected (identical shapes)
+   test_returned_cache_is_list_with_provenance
+   test_plain_list_and_all_none_caches_still_valid
+   test_validated_chunked_decoding_matches_uncached x8 (depth 1/2/4/8 x
+       cycle/sequence, batch 2, chunks 1,6,1,1,11; |delta| < 1e-5)
+   test_autocast_cache_dtype_accepted (bf16 cache under CPU autocast
+       accepted; the same cache in fp32 without autocast rejected)
+   test_cached_generate_matches_uncached_greedy
+   Pre-existing: the 8 cached-vs-uncached tests and the wrong-length test in
+   tests/test_recurrent.py still pass.
+   Codex probe A after the fix: the 96 chunked FP64 cases give the same
+   numbers as in the audit (max logit delta 2.220446049250313e-16, future
+   delta 0.0, gradient delta 6.938893903907228e-18).  Its malformed-prefix
+   step now raises "cache slot 1 (application of block 0): cached length 2
+   != slot 0 length 5" (intended; the script stops there).
+   Mutation check: restoring the old slot-0 handling fails 24 tests.
+
+7. Remaining limitations
+   - Content is not validated: a hand-built PLAIN list with correct shapes
+     but wrong values passes.  So does a cache made before the producing
+     model's weights changed (e.g. after an optimizer step).  Provenance
+     only exists on caches returned by forward(); list(cache) drops it.
+     Nothing in the pipeline does either; generate() builds and consumes
+     its own cache.
+   - The validator adds a Python loop over A slots to every cached forward
+     (A <= 16 in all planned arms).  Its latency was not measured on GPU.
+
+
+==============================================================================
+FIX 3 - INFERENCE PROFILING   (Codex DML-A03, HIGH)
+==============================================================================
+
+1. What Codex found
+   (a) Analytic weight/KV bytes assumed 2-byte storage while checkpoints
+       load in FP32.
+   (b) Each generate() reset the CUDA peak, so the aggregate reported only
+       the last run's peak.
+   (c) Context strings undershoot their targets: a word tokenizer gave 9
+       tokens for both 16 and 32.
+   (d) Exact-full prompts leave zero decode tokens.
+   (e) TTFT read perf_counter after launching CUDA prefill, before the
+       device finished.
+   (f) Prefill K/V are views of the fused QKV output and retain Q storage:
+       43,200 underlying bytes for 28,800 logical bytes.  Decode
+       concatenation keeps the old cache live.
+   The review also asked for profiling that cannot pair a model with the
+   wrong configuration, device-wide memory, and results that state dtype,
+   lengths and depth.
+
+2. How the defect was reproduced (post_audit/repro_before.txt)
+   (a) accounting weight_bytes 216,064 vs actual FP32 parameter bytes
+       432,128 for the smoke-size model: a factor of 2.
+   (c) sweep with Codex's word tokenizer: [(16, 9), (32, 9)].
+   (d) byte tokenizer, target = context_length 128: actual 128 prompt
+       tokens, decode_tok_per_s None.
+   (f) prefill cache: logical 10,240 bytes, retained storage 15,360 bytes.
+   (b), (e) and profile_model's cfg/model pairing were confirmed by
+   reading the code.  They cannot be observed on a CPU-only build.
+
+3. Why the problem occurred
+   The profiler was written for the conventional baseline, where cfg and
+   model always agreed.  It assumed bf16 storage in its formulas, used text
+   prompts for convenience, and inherited generate()'s per-call peak reset
+   and CPU-style timing.
+
+4. Exactly what code was changed
+   domovoi/inference/generate.py:10-12, 70-87, 93, 101-102, 109-111,
+     115-120, 128-133, 145, 154-160, 172-174, 187, 198-200, 206-211
+   domovoi/profiling/profiler.py:16-19, 31, 77-147, 150-195, 205-236
+   domovoi/profiling/accounting.py:50-53
+   scripts/generate.py:59-60; scripts/profile_model.py:90-91
+
+5. What each changed line does and why it is necessary
+   generate.py
+     70-74   _sync(): torch.cuda.synchronize on CUDA, no-op on CPU (e).
+     77-87   cache_bytes(): exact logical and retained-storage bytes of a
+             cache, deduplicated by storage (f: measured, not changed).
+     93, 101-102  prompt may be None when prompt_ids is given; reset_peak
+             is optional (default True = old behaviour).
+     128-133 exact prompt ids are used as given (c).
+     145     the peak reset happens only if reset_peak (b).
+     154-160 prefill is timed between two synchronisations (e).
+     172-174 TTFT = prefill + sampling of the first token, read after the
+             token id is on the host.  None if no token can be sampled.
+     187     sync before stopping the decode clock.
+     198-200 prefill_s reported; prefill tok/s divides by the synchronized
+             prefill time.
+     206-211 final_sequence_length, exact KV bytes, effective_depth (number
+             of cache slots) and dtype in every result.
+   profiler.py
+     16-19   docstring: which keys are estimates, exact counts or CUDA
+             measurements.
+     77-79   _median(): skips None (no fabricated zeros).
+     82-88   device_wide_used_mb(): whole-GPU usage from the driver (all
+             processes), labelled a snapshot, not a peak.
+     91-96   _vram_basis(): "not measured" on CPU; on CUDA, which counters
+             were read over which window.
+     99-116  profile_inference: exact prompt_ids option; ONE peak reset
+             after warmup, then all timed runs with reset_peak=False, so
+             the peak read at line 116 is the maximum over all runs (b).
+     119-147 result: actual lengths, device-wide snapshot, exact KV bytes,
+             effective_depth, dtype and a measurement_basis entry for each
+             measured quantity.
+     150-195 profile_context_sweep: prompts are exact id sequences (c);
+             target capped at context_length - max_new_tokens so every row
+             decodes its tokens, and capped rows say so (d).  Each row
+             reports requested/target/actual lengths, new tokens, final
+             length, context length, effective depth, exact KV bytes, VRAM
+             peaks (null on CPU), TTFT and decode speed.
+     205-215 profile_model refuses a cfg whose signature differs from the
+             model's.  The analytic estimates come from cfg and the
+             measurements from the model, so a mismatch would publish one
+             schedule's estimates next to another's measurements.
+     217-236 analytic estimates use the model's REAL element size (a);
+             exact parameter bytes; the profile states depth, order,
+             explicit schedule, dtype and device.
+   accounting.py
+     50-53   the estimate dict carries "basis": "analytic estimate ...; not
+             a measurement" and its bytes_per_param/bytes_per_kv
+             assumptions.
+   scripts/generate.py:59-60, scripts/profile_model.py:90-91
+             print TTFT only when it exists (it can now be None).
+   Token throughput: decode tok/s counts exactly the tokens produced inside
+   the timed decode loop (the first token belongs to TTFT), and prefill
+   tok/s counts prompt tokens over synchronized prefill time.  Training
+   tok/s (unchanged) counts batch x context x accumulation per optimizer
+   step.  All three were re-read and count the right operations.
+
+6. Tests that verify the correction
+   test_context_sweep_uses_exact_lengths (Codex's tokenizer: now (16,16),
+       (32,32))
+   test_context_sweep_reserves_decode_headroom (full-context request capped
+       to ctx-8, flagged, decodes 8 tokens)
+   test_context_sweep_rejects_no_room
+   test_profile_model_rejects_mismatched_config
+   test_profile_model_bytes_use_real_dtype_and_are_labelled (bytes_per_param
+       4 for FP32; analytic weight_bytes == counted parameter bytes;
+       logical KV bytes == analytic per-token bytes x final length)
+   test_prefill_cache_storage_overhead_is_reported (1.5x after prefill,
+       1.0x after one decode step)
+   test_profile_inference_takes_peak_over_all_runs (timed runs call
+       generate with reset_peak=False)
+   test_generate_exact_ids_and_ttft_definition (13 exact tokens; TTFT >=
+       prefill time; TTFT None when the prompt fills the context)
+   test_accounting_labels_its_assumptions
+   Pre-existing profiling and generation tests still pass (VRAM null on
+   CPU, decode tok/s null when the loop did not run).
+   repro_after.txt: sweep [(16, 16), (32, 32)]; full-context request ->
+   (120, 120, 2777.4 tok/s on CPU).
+
+7. Remaining limitations (PROFILING LIMITATIONS)
+   - NOTHING in Fix 3 was executed on CUDA.  The synchronisation, the
+     peak-over-runs behaviour and the device-wide snapshot are implemented
+     but unverified on a GPU.  Mutation M5 (forcing the per-run reset back
+     on inside generate) is NOT caught by any CPU test; only the call
+     contract is tested.  The brief allowed bounded CUDA smoke tests where
+     the environment supports them, and this one does not: .venv has a CPU
+     build of torch.  A CUDA build would be a multi-gigabyte install.  It
+     should go into a SEPARATE environment so the audited CPU .venv stays
+     unchanged as the reference, so it was left for the owner to decide
+     rather than installed during this unattended session.
+   - The prefill K/V storage retention (1.5x after prefill) and the
+     transient old+new cache during decode concatenation were NOT changed.
+     Changing them alters the control's memory behaviour and is a separate
+     decision.  They are now measured and reported; they affect both arms
+     identically.
+   - Profiles run in the checkpoint's dtype (FP32).  No bf16 inference
+     path or flag exists yet, so a bf16 inference peak would need one.
+   - Logits for the full prompt are materialised during prefill (B x T x V);
+     final-position-only prefill logits are not implemented.
+   - The 4 GiB target is NOT claimed for anything.  No inference peak has
+     been measured on any GPU, let alone the reference hardware.
+
+
+==============================================================================
+FIX 4 - EXPERIMENT PLANNER INTEGRITY   (Codex DML-A04, partially)
+==============================================================================
+
+1. What Codex found
+   The default matrix fixes one seed and uses tinyshakespeare.  Generated
+   configs inherit an explicit output ID if the custom base has one, and
+   same-named arm YAML files are overwritten.  (The methodological points,
+   such as corpus, paired effects and thresholds, are addressed in
+   docs/DOMOVOI_PILOT_PLAN.md, not in code.)
+
+2. How the defect was reproduced
+   By inspection of build_arms: clone_config copied the entire base,
+   including output.experiment_id.  write_text was unconditional.  The new
+   tests test_planner_never_inherits_experiment_id and
+   test_planner_refuses_to_overwrite encode both cases.
+
+3. Why the problem occurred
+   The planner was written for the default base config, whose
+   experiment_id is null, and as a one-shot generator.
+
+4. Code changed: scripts/plan_recurrent_experiments.py:18-21, 62-63,
+   66-86, 94-99, 103-104, 108, 113, 123-128.
+
+5. What each changed line does
+   62-63   PILOT_ARMS = ("B02", "R02x4", "B08").
+   66-86   build_arms(base, only, seeds): optional arm filter, one config
+           per seed (names gain "_s<seed>"), output.experiment_id forced
+           to None, the seed recorded in the notes.  With no options the
+           output is the same ten configs as before.
+   94-99   --pilot, --seeds, --force.
+   103-104 builds the requested subset.
+   108, 113  arm column widened for seed-suffixed names.
+   123-128 if any target file exists and --force is absent: print the
+           list, exit 1, write nothing.
+   18-21   docstring usage and guarantees.
+
+6. Tests: test_planner_never_inherits_experiment_id (9 configs, all with
+   experiment_id None, seeds {1,2,3}); test_planner_refuses_to_overwrite
+   (sentinel survives; --force replaces it).
+
+7. Limitations: the default base is still tinyshakespeare, which is only
+   a plumbing check.  The pilot needs a new base config on a new corpus,
+   which does not exist yet (see the pilot plan's prerequisites).
+
+
+==============================================================================
+FIX 5 - recurrence_schedule INPUT TYPES   (Codex DML-A08, partially)
+==============================================================================
+
+1. Found: recurrence_schedule(2, True, "cycle") accepted True as depth 1.
+2. Reproduced by test (before: no error; True behaves as 1).
+3. Cause: bool is a subclass of int in Python.  The YAML path was already
+   type-checked in config.py; direct construction was not.
+4. Code: domovoi/models/domovoi_recurrent.py:55-57.
+5. Lines: 55 comment; 56 rejects any non-int or bool n_blocks/depth; 57
+   message.
+6. Test: test_recurrence_schedule_rejects_non_int (True, False, 2.0, "2"
+   for both arguments).
+7. Limitations: huge legal depths (e.g. 10^7) are still accepted and would
+   allocate a large schedule.  Nothing caps depth.  The accounting module
+   still assumes biased blocks and dense multi-head attention.
+
+
+==============================================================================
+RE-REVIEW ROUND (Codex re-review of the fixes above: APPROVE AFTER FIXES)
+==============================================================================
+Codex independently confirmed 207 passing tests, the rejected schedule and
+cache cases, the 1.79e-7 cached/uncached agreement, bit-exact baseline
+equivalence and unchanged DML-0001 hashes, and raised two issues plus pilot
+protocol points.  Reproduction script: post_audit/scripts/repro_rereview.py.
+Outputs: repro_rereview_before.txt / repro_rereview_after.txt.  (The R3
+print, now lines 73-75, was afterwards made to read both the old "dtype"
+field and the new "weight_dtype" field, so the script runs on both
+versions.  The "before" output came from the original single line.)
+No byte snapshot of the end of the first round was taken before these
+edits.  This round's changes are described here and in
+ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt entries marked [RE-REVIEW].  A
+snapshot of the final state is in post_audit/post_rereview/ for future
+rounds.
+
+RR1 - CHECKPOINT PREFLIGHT MUST BE READ-ONLY   (High)
+1. Found: a refused resume moved a *.bak checkpoint into place before
+   rejecting the config; a fresh-run preflight accepted a directory with a
+   checkpoint when latest.json was missing.  Dataset/tokenizer hash checks
+   and single-writer protection were still open.
+2. Reproduced (repro_rereview_before.txt):
+     R1 "directory unchanged by the refused resume: False"
+        (step_00000002.bak -> step_00000002 renamed by the refused resume)
+     R2 "fresh run ACCEPTED into a directory with ['step_00000002']"
+3. Cause: the preflight used CheckpointManager.latest(), which performs the
+   crash-swap recovery as a side effect, and which finds checkpoints only
+   through latest.json.
+4. Code: domovoi/training/checkpoint.py:24, 27, 265-275, 282-343;
+   domovoi/training/trainer.py:21, 23, 35-38, 42-44, 108-112, 145-233,
+   290, 306-337.
+5. Lines (details in the doc, B.15 and B.16):
+   checkpoint.py 282-286  LatestCheckpoint: target path, where the files are
+                          now, which .bak to recover.
+                 289-291  _step_of: step number of step_N[.bak|.tmp].
+                 294-335  scan_checkpoints: READ-ONLY inventory of every step
+                          entry (complete, .bak, .tmp, other) independent of
+                          latest.json, plus the indexed checkpoint (read in
+                          place from the .bak after a crashed swap).
+                 338-343  recover_checkpoint: the only rename, called after
+                          validation.
+                 265-275  latest() = scan + recover, so its behaviour for
+                          scripts/profile_model.py and evaluate.py is
+                          unchanged.
+   trainer.py    110-112  validate first, then recover_checkpoint().
+                 161-172  fresh run refused if ANY trace exists.
+                 173-181  resume needs a readable indexed checkpoint; with
+                          step dirs but no usable index it refuses to guess.
+                 182-187  newer complete checkpoints than the index => refuse.
+                 188-203  model-section check and graph-signature check,
+                          both on the in-place (possibly .bak) files.
+                 204-216  data provenance: checked when recorded; a checkpoint
+                          without it (all older ones, including DML-0001's)
+                          resumes with a warning.
+                 219-233  _data_provenance(): tokenizer sha256, dataset
+                          name/version, raw/train/val sha256, token counts.
+                 290      every saved checkpoint records it.
+                 306-337  train() holds an O_EXCL lock file (.writer.lock)
+                          around the unchanged loop (_train_unlocked); a
+                          second writer is refused; the lock is released on
+                          completion, Ctrl+C and exceptions.
+6. Tests (tests/test_rereview.py): test_refused_resume_does_not_recover_bak,
+   test_valid_resume_recovers_bak_after_validation, test_scan_is_read_only,
+   test_fresh_run_sees_checkpoints_without_index x2,
+   test_resume_refuses_to_guess_without_index,
+   test_resume_refuses_newer_unindexed_checkpoint,
+   test_checkpoint_records_data_provenance, test_resume_refuses_changed_data,
+   test_resume_of_pre_provenance_checkpoint_warns,
+   test_second_writer_refused_and_lock_released,
+   test_lock_released_on_exception, test_manager_latest_still_recovers.
+   repro_rereview_after.txt: R1 "unchanged ... True", R2 "fresh run refused".
+   Mutations (post_audit/mutation_rereview_results.txt): eager recovery -> 1
+   failure; index-only fresh-run check -> 3; no lock -> 1.
+7. Remaining limitations:
+   - [RESOLVED in round 3] The lock covered the training loop only; the
+     CLI's metadata merge and the recovery rename happened before it.
+     (Still true: a hard-killed process leaves a stale lock that must be
+     deleted by hand, and the lock file protects cooperating Domovoi
+     processes only.)
+   - [RESOLVED in round 3] The packed .bin files were not hashed; identity
+     rested on manifest text hashes and manifest token counts.
+   - [RESOLVED in round 3; missed in this round] Recovery still happened
+     BEFORE the weights/optimizer were loaded, so a damaged .bak could be
+     moved into place by a resume that then failed.
+   - Pre-re-review checkpoints carry no provenance; their resume is
+     allowed with a warning.
+   - CheckpointManager.latest() still recovers when called directly (by
+     profile/eval scripts).  Only the training preflight is read-only.
+   - Concurrent experiment-ID allocation and metadata read-modify-write
+     races (DML-A06) are unchanged.
+
+RR2 - WEIGHT vs KV PRECISION IN PROFILING   (Medium)
+1. Found: with FP32 weights under bf16 CPU autocast the profiler reported
+   FP32 and estimated 1,024 KV bytes per token; the cache held 512.
+2. Reproduced (R3 in repro_rereview_before.txt): "reported dtype:
+   torch.float32 | KV dtype field: <absent>"; "estimated KV bytes/token:
+   1024 | measured KV bytes/token: 512".
+3. Cause: the fix-3 estimate used the weight element size for both weights
+   and K/V.  Under autocast the K/V dtype is the autocast dtype.
+4. Code: domovoi/models/kv_cache.py:44, 106 (rename to public
+   expected_kv_dtype); domovoi/profiling/profiler.py:31, 139-140, 220-227,
+   236-238, 245; domovoi/inference/generate.py:115-116, 212-214;
+   tests/test_post_audit.py (one assertion updated from "dtype" to
+   "weight_dtype"/"kv_dtype").
+5. Lines: generate() reports weight_dtype and kv_dtype, the latter read
+   from the cache tensor.  profile_inference passes both through.
+   profile_model computes kv_dtype with the validator's own rule (autocast
+   dtype if active, else the weight dtype), reports weight_dtype, kv_dtype
+   and autocast, and passes bytes_per_kv = the KV element size to the
+   estimate.
+6. Tests: test_profile_separates_weight_and_kv_dtype (autocast off/on:
+   dtypes reported correctly; estimated KV bytes == measured cache bytes;
+   weight bytes estimate == counted bytes).  repro_rereview_after.txt:
+   "torch.float32 | KV dtype field: torch.bfloat16"; "512 | 512".  Mutation
+   "KV estimate in weight dtype" -> 1 failure.
+7. Limitations: the CUDA synchronisation and peak aggregation are STILL
+   not exercised on a GPU.  The "dtype" field of generate()/profile results
+   introduced in the first round was replaced by weight_dtype/kv_dtype (no
+   stored profile used it).
+
+TORCH 2.4 FLOOR: Codex checked the PyTorch 2.4.0 source and confirmed that
+both device-aware autocast calls exist there.  The suite itself was run only
+on torch 2.15 (CPU).
+
+PILOT PLAN (docs/DOMOVOI_PILOT_PLAN.md), the protocol points Codex raised:
+  - Repeated windows: a 110M-token split cannot prevent them with the
+    current random-offset sampler.  The plan now says so and requires a
+    no-replacement segment sampler (new prerequisite P9: disjoint 513-token
+    segments in a seed-determined order; 214k available vs 195,328 needed).
+  - Stop rules were inconsistent ("any divergence" vs "2 seeds").  Now ANY
+    diverging run (conditions 1-3) stops the pilot, and memory/time
+    conditions 4-5 stop only that run.
+  - Five-seed extension: every "all 3 seeds" rule is read as "all 5 seeds",
+    per-seed bounds apply to all 5, means are over 5, and A3 covers 15 runs.
+  - A4 now names the field (context_sweep row target_tokens == 448,
+    peak_vram_allocated_mb, FP32, no autocast), the procedure (3 profiles
+    per arm in separate processes) and the margin:
+    mean(B08) - mean(R02x4) >= max(3 x larger max-min spread, 16 MiB).
+  - A misstatement was corrected: the sweep uses profile_model's default of
+    8 new tokens, not 64.
+  Codex's other recommendations were adopted as stated: keep the shared
+  pipeline, use fresh B02/B08 controls, and treat DML-0001 as a historical
+  reference.
+
+
+==============================================================================
+ROUND 3 (Codex's third review)
+==============================================================================
+Codex confirmed 222 passing tests and the three re-review fixes, and found
+two remaining research-integrity gaps.  Reproduction:
+post_audit/scripts/repro_round3.py; outputs repro_round3_before.txt /
+repro_round3_after.txt.  (The script's M1 step first failed on Windows
+because an earlier Trainer still had train.bin memory-mapped.  It was
+changed to modify the file through a writable memory map, and the run was
+repeated before any code fix.  That first attempt showed the same H1/H2
+results and its output file was overwritten, so both recorded outputs come
+from the same corrected script.)
+
+R3-H - THE WRITER LOCK STARTED TOO LATE   (High)
+1. Found: Trainer.__init__ could rename a backup before loading its weights
+   and optimizer, so a damaged backup moved into place before the resume
+   failed.  The CLI wrote metadata before the lock, and a competing resume
+   that lost the lock marked the active run FAILED.
+2. Reproduced (repro_round3_before.txt):
+     H1 damaged optimizer.pt in the .bak: "resume failed: UnpicklingError",
+        "directory unchanged by the failed resume: False"
+     H2 scripts/train.py --resume against an experiment whose lock is held:
+        "exit code: 1 | status now: FAILED | experiment unchanged: False"
+3. Cause: (a) the re-review fix ordered validate -> recover -> load, so
+   only the JSON-level checks preceded the rename; the actual tensor and
+   pickle loads came after it.  (b) The lock lived in train(), so
+   everything the Trainer constructor and the CLI did before training was
+   unlocked.  Losing the lock raised inside train(), after trainer_ready
+   was set, so the CLI's failure path wrote FAILED.
+4. Code: domovoi/training/trainer.py:25, 110-137 (lock first; load in
+   place; recover last; release on any failure), 144-193 (lock
+   acquire/release/close/__del__ with an owner token), 195-213
+   (_load_resume reads found.read_from), 399-413 (train() no longer
+   creates the lock; release_lock flag); scripts/train.py:72, 97-98,
+   121-135 (keep the lock through the status write, close() last).
+5. Lines: explained in ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt B.16 and
+   B.9 [ROUND 3].  In short:
+     - __init__ acquires the lock before validation.  A held lock raises
+       CheckpointError with nothing written.
+     - The checkpoint is LOADED from where it is (the .bak after a crashed
+       swap), and the .bak is renamed only after that load succeeded.
+     - Any exception in that sequence releases the lock and re-raises, so
+       the experiment is left as found.
+     - The lock file holds a unique token, and release only deletes a lock
+       holding this Trainer's token.
+     - The CLI trains with release_lock=False and calls trainer.close()
+       after the status write.
+6. Tests (tests/test_round3.py):
+     - test_damaged_backup_is_not_moved_into_place x3 (optimizer, model,
+       scheduler)
+     - test_lock_is_held_from_construction_until_close
+     - test_close_never_deletes_another_writers_lock
+     - test_resume_without_existing_dir_creates_nothing
+     - test_cli_resume_that_loses_the_lock_leaves_experiment_untouched
+     - test_cli_successful_resume_releases_lock_after_status
+     - updated: test_rereview.py::test_second_writer_refused_and_lock_released
+       (now refused at construction, directory unchanged)
+   repro_round3_after.txt: H1 "unchanged ... True"; H2 "exit code: 1 |
+   status now: RUNNING | experiment unchanged: True".
+   Mutations (mutation_round3_results.txt): recover-before-load -> 3
+   failures; no lock in __init__ -> 1.
+7. Limitations:
+   - A fresh run's metadata.json is written by create_experiment before the
+     Trainer exists.  That directory is created atomically by the same
+     process and refused if it already exists, so no other writer can hold
+     it.
+   - A hard-killed process leaves a stale lock (manual removal).
+   - The lock is a cooperative file lock, not an OS lock.
+   - A Trainer that is constructed but never trained or closed holds the
+     lock until it is garbage-collected (__del__ is best effort).
+
+R3-M - RESUME VERIFIED THE MANIFEST, NOT THE PACKED INPUTS   (Medium)
+1. Found: the recorded train/val hashes describe the source text and the
+   token counts come from meta.json, so a changed packed .bin with the same
+   manifest passed.
+2. Reproduced: train.bin modified in place (100 tokens changed, same size,
+   manifest untouched): "resume ACCEPTED with a modified train.bin".
+3. Cause: the re-review provenance used only fields from meta.json.
+4. Code: domovoi/training/trainer.py:33, 110-111, 280-295, 298-325, 382.
+5. Lines:
+     - Provenance is computed once at construction.  It adds
+       train_bin_sha256 / val_bin_sha256 of the exact files the loader
+       opened, and token counts measured from those files.
+     - A file whose token count differs from meta.json is refused at
+       construction.
+     - On resume, every recorded field must match.  Fields an older
+       checkpoint did not record are named in a warning.
+6. Tests:
+     - test_checkpoint_records_packed_file_hashes_and_actual_counts
+     - test_resume_refuses_modified_packed_file_with_same_manifest
+     - test_packed_file_disagreeing_with_manifest_count_is_refused
+     - test_resume_of_older_provenance_format_warns
+   repro_round3_after.txt M1: "resume refused: CheckpointError ...".
+   Mutation "manifest-only provenance" -> 3 failures.
+7. Limitations: each packed file is read in full once per Trainer
+   construction (about one corpus read; unmeasured at pilot scale).
+   Re-review-round checkpoints have no .bin hashes (resume warns).
+   Checkpoints from before the re-review round have no provenance at all
+   (resume warns).
+
+Pilot plan: Codex reports the four protocol ambiguities resolved and the
+FP32 448-token memory criterion suitable; no plan change was needed this
+round.  Codex's approval conditions for the pilot are:
+  - close the resume gaps (this round);
+  - implement the evaluator (P5), the stop checks (P8) and the no-repeat
+    sampler (P9);
+  - verify timing and peak aggregation in a bounded CUDA smoke test (P2).
+
+
+==============================================================================
+ROUND 4 (Codex's fourth review)
+==============================================================================
+Codex confirmed the round-3 protections and found four more integrity gaps
+in the training loop.  Codex found no reason to redesign the recurrent
+model.  Reproduction: post_audit/scripts/repro_round4.py; outputs
+repro_round4_before.txt / repro_round4_after.txt.
+
+R4-1 - CTRL+C INSIDE AN OPTIMIZER UPDATE   (High)
+1. Found: an interrupt right after the third real AdamW update produced a
+   rescue checkpoint that loads as step 2 with every AdamW counter at 3, so
+   resume could apply a batch twice.
+2. Reproduced: "latest checkpoint step_00000002: recorded step 2, AdamW
+   step counters [3.0]".  It was worse than reported: the rescue (named by
+   last_step = 2) OVERWROTE the clean periodic step-2 checkpoint.
+3. Cause: last_step and the RNG boundary move only after the whole update.
+   An interrupt between optimizer.step() and that point left the
+   in-memory state one update ahead of last_step, and the handler saved it
+   under last_step.
+4. Code: domovoi/training/trainer.py:490-496, 544-545, 566-567, 613-630,
+   653-662, 671-676, 681-682, 702-705.
+5. Lines:
+     - in_update is True from just before the scaler/optimizer step until
+       last_step, the RNG boundary and committed_tokens are updated.
+     - On KeyboardInterrupt inside that window, NO checkpoint is written
+       (torn = True).  The summary names the last committed checkpoint
+       (read-only lookup), reports committed steps and tokens, and skips
+       evaluation of the between-steps model.
+     - Interrupts outside the window keep the existing exact rescue.
+6. Test: test_interrupt_inside_update_writes_no_rescue_and_resume_matches.
+   After the interrupt, step_00000002 is the periodic checkpoint: not
+   marked interrupted, AdamW counters {2}.  Resuming from it reproduces the
+   uninterrupted run (reconciled losses, final weights, sampler state).
+   The existing mid-step and in-validation rescue tests still pass.
+   Mutation N1 (window never opened) -> 1 failure.
+7. Limits: the window is a Python flag, so an interrupt delivered between
+   bytecodes right at its edges is classified conservatively (no rescue).
+   A process kill (SIGKILL, power loss) never writes a rescue checkpoint
+   anyway; the last periodic checkpoint is the recovery point.
+
+R4-2 - A NON-FINITE RUN COULD END AS COMPLETED   (High)
+1. Found: a NaN loss in a 2-step FP32 run produced a saved checkpoint, NaN
+   validation loss and COMPLETED.
+2. Reproduced: "status: COMPLETED | final_val_loss: nan | checkpoints:
+   ['step_00000002']".
+3. Cause: the loop never checked for non-finite values.
+4. Code: trainer.py:63-65 (NonFiniteTrainingError), 521-525, 531,
+   537-542, 603-607, 631-636, 653-662.
+5. Lines:
+     - The training loss is read before backward; a NaN/inf raises before
+       any gradient or update.
+     - Without an fp16 GradScaler, a non-finite gradient norm raises before
+       optimizer.step().  The scaler handles inf gradients itself by
+       skipping that update.
+     - A non-finite validation loss is recorded in its row and then raises.
+     - The handler sets FAILED with the reason, and no checkpoint is
+       written from that state.
+     - The final evaluation now runs before the final checkpoint, and a
+       non-finite result fails the run with no final checkpoint.
+   scripts/train.py already maps summary status FAILED to the experiment
+   status and exit code 1.
+6. Tests: test_nan_loss_fails_before_the_update,
+   test_nan_gradient_fails_before_the_update (weights equal the post-step-1
+   weights), test_nan_validation_fails_and_is_recorded.
+   repro_round4_after.txt: "status: FAILED | final_val_loss: None |
+   checkpoints: []".  Mutations N2 (no loss/validation checks) -> 2
+   failures, N3 (gradient NaN hidden) -> 1.
+7. Limits:
+   - This is the non-finite part of pilot prerequisite P8 only.
+     Divergence (1.5x running minimum), the sustained grad-norm limit, the
+     12 GiB memory limit and the time projection are still NOT implemented.
+   - Under fp16 a long run of skipped (inf-gradient) steps is not flagged.
+
+R4-3 - RESUME ACCEPTED A CHANGED TRAINING PROTOCOL   (Medium)
+1. Found: a step-2 checkpoint accepted a different batch size and grad clip
+   (tokens per update 64 -> 96) under the same experiment ID.
+2. Reproduced: "resume ACCEPTED; tokens/update 96 vs checkpoint run 64".
+3. Cause: resume compared the model section and the data, but not the
+   training section.  A changed training.steps produced only a warning.
+4. Code: trainer.py:51-60 (TRAJECTORY_FIELDS), 75, 81-84, 251, 293-326,
+   227-228 (the old steps warning removed), 436-437, 669-670;
+   scripts/train.py:43-46, 58-59, 80-81.
+5. Lines:
+     - These training fields must equal the checkpoint's on resume: steps,
+       batch_size, gradient_accumulation, context_length, learning_rate,
+       min_lr_ratio, weight_decay, betas, grad_clip, warmup_steps,
+       precision, seed, eval_batches.  Both sides are normalised through
+       TrainingSection, with betas compared as lists.
+     - Only log/eval/checkpoint intervals may change, because they affect
+       when rows are written, not what is trained.
+     - A longer training.steps is possible only with an explicit opt-in
+       (Trainer(extend_steps=True), CLI --extend-steps).  It is recorded as
+       {"field": "steps", "from", "to", "at_step"} in "protocol_deviations"
+       in every later checkpoint and in the summary, so such a run can be
+       excluded from controlled comparisons.
+6. Tests: test_resume_refuses_changed_training_protocol x13 (each field;
+   directory unchanged), test_every_trajectory_field_is_covered,
+   test_interval_changes_are_allowed, test_extend_steps_is_opt_in_and_recorded.
+   Mutation N4 (no check) -> 15 failures.
+7. Changed tests (behaviour change, called out):
+     - tests/test_e2e_smoke.py (ORIGINAL suite) and tests/test_recurrent.py
+       resume with a longer schedule.  They now pass extend_steps=True; no
+       assertion changed.
+     - My own post-audit tests that lengthened steps only to have something
+       to resume now resume with the same protocol.
+       test_post_audit.py::test_resume_with_same_model_config_still_works
+       now changes log_interval instead.
+   Limit: the dataset/tokenizer identity is covered by data provenance,
+   not by this field list.
+
+R4-4 - DUPLICATE METRIC ROWS AFTER A CRASH   (Medium)
+1. Found: after an injected checkpoint-save failure the log held steps 1-4
+   while the committed checkpoint was 2; a resume left 1,2,3,4,3,4.
+2. Reproduced: identical rows (repro_round4_before.txt).
+3. Cause: rows are appended when a step is LOGGED, but recovery restarts
+   from the last COMMITTED checkpoint, and nothing tied rows to commits.
+4. Code: domovoi/experiments/metrics_log.py (new);
+   domovoi/experiments/__init__.py:4, 10; trainer.py:35, 497-500, 580,
+   599, 710-712.
+5. Lines:
+     - Raw logs stay append-only, because they are evidence.
+     - Each session appends {attempt, start_step} to sessions.jsonl and
+       stamps its rows with "attempt".
+     - read_metrics() drops a row when a later attempt started from an
+       earlier step, because that attempt replayed it.
+     - Rows without an attempt (all older runs, including DML-0001) count
+       as attempt 0, so old logs read unchanged.
+     - final_train_loss uses the reconciled view.
+6. Tests: test_crash_then_resume_reconciles_metrics_and_matches (raw
+   1,2,3,4,3,4 kept; reconciled 1,2 from attempt 1 and 3,4 from attempt 2;
+   the resumed run matches an uninterrupted run on losses, weights and
+   sampler state), test_legacy_metrics_without_sessions_read_unchanged.
+   repro_round4_after.txt: "reconciled rows: [1, 2, 3, 4]".  Mutation N5 ->
+   1 failure.
+7. Limits: report.py and scoreboard.py do not plot learning curves today.
+   Any future curve or report code must use read_metrics(), not the raw
+   file.
+
+Codex's integration-test suggestion (uninterrupted vs interrupted-and-
+resumed on sampler position, final weights and metric history) is
+implemented for the CURRENT random-offset sampler: _assert_same_run in
+tests/test_round4.py, used for both the torn interrupt and the failed-save
+crash.  The no-repeat sampler (P9), the full-split NLL evaluator (P5) and
+the remaining stop checks (P8) do not exist yet.  They are the next work,
+and the same integration test must be extended to the new sampler's
+position.
+
+
+==============================================================================
+BEHAVIOUR AND DEFINITION CHANGES (do not compare old and new numbers blindly)
+==============================================================================
+  - generate(): ttft_s now = synchronized prefill + first-token sampling
+    (was: unsynchronized prefill forward only), and is None when no token
+    can be sampled.  New field prefill_s.  prefill_tok_per_s now divides by
+    prefill_s.  No profile.json from before this change exists in the
+    repository, so no historical number is affected.
+  - profile_context_sweep(): targets are exact token counts and are capped
+    at context_length - max_new_tokens; rows gained fields.
+  - profile_inference(): peak VRAM = max over all timed runs (was: last
+    run only).
+  - profile_model(): raises ValueError when cfg does not describe the
+    model; analytic byte estimates are in the model's real dtype (FP32 => 4
+    bytes, previously always 2).
+  - scripts/train.py: --experiment-dir requires --resume.  A refused resume
+    exits 1 and leaves the experiment's status untouched.
+  - Trainer: resume refuses ANY model-section change (dropout included),
+    refuses a missing checkpoint (was a warning and a silent restart from
+    step 0), and refuses a fresh run into a directory with checkpoints.
+  - load_checkpoint / build_model_from_checkpoint: refuse architecture or
+    schedule mismatches and untied checkpoints without lm_head.weight.
+  - forward(): malformed caches raise CacheValidationError (a ValueError);
+    returned caches are ApplicationCache (a list subclass).
+  - pyproject.toml: torch>=2.4.
+  - [re-review] Result fields "dtype" -> "weight_dtype" + "kv_dtype"
+    (+ "autocast" in profile_model).  KV estimates use the KV dtype.
+  - [re-review] A fresh run refuses directories with ANY checkpoint trace.
+    A resume refuses a missing/stale index, changed data provenance and a
+    held writer lock.  A crashed-swap .bak is recovered only after
+    validation.  Checkpoints gain a "data_provenance" record.
+  - [round 3] Trainer() itself takes the writer lock (was: train()), and
+    raises if another writer holds it.  train() gained release_lock;
+    Trainer gained close()/release_lock().  A crashed-swap .bak is loaded
+    in place and renamed only after a successful load.  Provenance gains
+    train_bin_sha256/val_bin_sha256, and token counts now come from the
+    files.  A packed file whose size disagrees with meta.json is refused.
+  - [round 4] A Ctrl+C inside an optimizer update writes no rescue
+    checkpoint.  A non-finite loss, gradient norm or validation loss ends
+    the run as FAILED (summary "failure") without a checkpoint.  The final
+    evaluation now precedes the final checkpoint.  Resume refuses changed
+    trajectory fields (a changed training.steps used to be a warning).
+    --extend-steps / extend_steps=True is the only way to lengthen a run
+    and is recorded in "protocol_deviations".  Metric rows gain "attempt";
+    experiments gain sessions.jsonl.  Summaries gain failure, attempt,
+    protocol_deviations and recovery_checkpoint, and tokens_trained is the
+    committed count.
+
+
+==============================================================================
+AUDIT FINDINGS NOT ADDRESSED IN CODE (by design or out of scope)
+==============================================================================
+  DML-A05 pickle-based resume state (weights_only=False): trust boundary
+          documented; not changed.
+  DML-A06 concurrent ID allocation / metadata read-modify-write races,
+          DML-9999 rollover: not changed.  The pilot runs sequentially on
+          one GPU.
+  DML-A07 multiple-choice tokenisation boundaries and overlapping sampled
+          validation windows: not changed.  The pilot plan requires a
+          full-split, document-held-out, token-weighted NLL evaluator
+          that does NOT exist yet (prerequisite P5 in the plan).
+  DML-A08 accounting conventions (biases, dense MHA): documented, not
+          changed.
+  Codex: interruption during a partially applied optimizer update is not
+          covered by resume tests.  Not changed.
+
+
+==============================================================================
+TEST RESULTS (all executed 2026-11-23, CPU, commands in post_audit/README.md)
+==============================================================================
+  Full suite, before this remediation (Codex's run): 138 passed
+  Full suite, after:                                 207 passed in 8.9 s
+      (75 original + 63 test_recurrent.py + 69 test_post_audit.py)
+  tests/test_post_audit.py alone:                    69 passed
+  Codex probe A (FP64 schedule/cache/gradient):      identical numbers to
+      the audit (96 cases; 2.22e-16 / 0.0 / 6.94e-18); malformed step now
+      raises (intended)
+  Codex probe B:                                     changed-schedule load
+      now raises CheckpointError (intended)
+  Codex probe C:                                     upstream exact 4/4;
+      8K arithmetic unchanged (69,589,248 vs 15,581,056 parameters; 320
+      MiB logical KV each); 4 DML-0001 files identical; 1045 numbered doc
+      quotes, 0 mismatches
+  Codex probe D (coverage vs pinned upstream):       all 21 documented
+      files, no missing lines
+  post_audit/scripts/check_doc.py:                   21 files missing=0,
+      ALL QUOTES MATCH
+  post_audit/scripts/baseline_equivalence.py:        3/3 configs bit-exact
+  CLI end-to-end on CPU, in a temporary directory outside experiments/
+  (post_audit/e2e_cli_smoke.txt, script post_audit/scripts/e2e_scripts.ps1):
+      synthetic data -> scripts/train.py (6 steps, recurrent depth 2)
+      exit 0 -> scripts/generate.py exit 0 (also with max-new-tokens 0,
+      where TTFT is None and is not printed) -> scripts/profile_model.py
+      exit 0 (schedule [0,1,0,1]; FP32 4 bytes/param; estimated weight
+      bytes 115,200 == measured 115,200; sweep (16,16), (32,32), (64 ->
+      capped 56); VRAM "not measured: no CUDA device") -> resume of that
+      experiment with recurrence_order changed: refused, exit 1, "status
+      left unchanged", every file in the experiment unchanged.
+  Documented commands re-run verbatim after the fixes: F.2 exit 0
+      (10,665,856 unique / 33,812,224 applied / effective depth 8); F.3 exit
+      0 (max |cached - uncached| logit 1.79e-7); F.5 exit 0 (schedule
+      [0,1,0,1,0,1,0,1]).
+  Mutation checks (post_audit/mutation_results.txt):
+      M1 no architecture check on load         -> 7 tests fail
+      M2 old slot-0 cache handling             -> 24 tests fail
+      M3 lax resume (no model-section check)   -> 5 tests fail
+      M4 lm_head waived for untied models      -> 1 test fails
+      M5 per-run CUDA peak reset inside generate -> 0 fail (CUDA-only
+         behaviour; NOT detectable on CPU; see Fix 3 limitations)
+  RE-REVIEW ROUND (all executed 2026-11-23, same CPU environment):
+      Full suite:                         222 passed (75 + 63 + 69 + 15)
+      tests/test_rereview.py:             15 passed
+      tests/test_post_audit.py:           69 passed
+      repro_rereview_after.txt:           R1 directory unchanged True; R2
+                                          fresh run refused; R3 KV dtype
+                                          bfloat16, estimate 512 == measured 512
+      Re-review mutations:                R1 eager recovery -> 1 fail;
+                                          R2 index-only fresh-run check -> 3;
+                                          R3 KV estimate in weight dtype -> 1;
+                                          R4 no writer lock -> 1
+      First-round mutations re-run:       M1 7, M2 24, M3 6, M4 1 failures.
+                                          M3 rose from 5 to 6 partly because
+                                          its stand-in function returns a bare
+                                          path where the preflight now returns
+                                          a LatestCheckpoint, so treat 6 as
+                                          "still caught", not as one more
+                                          detection.
+      Codex probes after this round:      A same FP64 numbers; B refusal;
+                                          C upstream exact 4/4, 1158 doc
+                                          quotes, 0 mismatches; D no uncovered
+                                          line in 22 files
+      check_doc.py:                       22 files missing=0, ALL QUOTES MATCH
+      baseline_equivalence.py:            3/3 bit-exact
+      CLI end-to-end (e2e_cli_smoke.txt): train/generate/profile exit 0;
+                                          refused resume exit 1, directory
+                                          unchanged, no .writer.lock left;
+                                          F.2 (untruncated) / F.3 / F.5 exit 0
+      No CUDA test was run.
+  ROUND 3 (all executed 2026-11-23, same CPU environment):
+      Full suite:                         234 passed (75 + 63 + 69 + 15 + 12)
+      tests/test_round3.py:               12 passed
+      repro_round3_after.txt:             H1 unchanged True; H2 exit 1,
+                                          status RUNNING, unchanged True;
+                                          M1 resume refused
+      Round-3 mutations:                  K1 recover-before-load -> 3 fail;
+                                          K2 no lock in __init__ -> 1;
+                                          K3 manifest-only provenance -> 3
+      Earlier mutations re-run:           M1 7, M2 24, M3 6, M4 1; R1 1,
+                                          R2 3, R3 1.  R4 now fails 10: its
+                                          stand-in train() never releases
+                                          the lock that __init__ takes, so
+                                          it no longer isolates one
+                                          behaviour; K2 replaces it.
+      Codex probes:                       A same FP64 numbers; B refusal;
+                                          C upstream exact 4/4, 1233 doc
+                                          quotes, 0 mismatches; D no
+                                          uncovered line in 23 files
+      check_doc.py:                       23 files missing=0, ALL QUOTES MATCH
+      baseline_equivalence.py:            3/3 bit-exact
+      CLI end-to-end:                     train/generate/profile exit 0;
+                                          refused resume exit 1, directory
+                                          unchanged; no lock file left
+      No CUDA test was run.
+  ROUND 4 (all executed 2026-11-23, same CPU environment):
+      Full suite:                         256 passed (75 + 63 + 69 + 15 + 12 + 22)
+      tests/test_round4.py:               22 passed
+      repro_round4_after.txt:             F1 AdamW counters [2.0] at step 2;
+                                          F2 FAILED, no checkpoint; F3 refused;
+                                          F4 reconciled [1, 2, 3, 4]
+      Round-4 mutations:                  N1 1, N2 2, N3 1, N4 15, N5 1
+      Earlier mutations re-run:           M1 7, M2 24, M3 6, M4 1; R1 1, R2 3,
+                                          R3 1; K1 3, K2 1, K3 3
+      Codex probes:                       A same FP64 numbers; B refusal;
+                                          C upstream exact 4/4, 1371 doc
+                                          quotes, 0 mismatches; D no
+                                          uncovered line in 27 files
+      check_doc.py:                       all files missing=0, ALL QUOTES MATCH
+      baseline_equivalence.py:            3/3 bit-exact
+      CLI end-to-end:                     as before; no lock file left
+      No CUDA test was run.
+  DML-0001 SHA-256 (before and after, re-checked after round 4):
+      config.yaml       064E08911F75360085C7A3E0E75C02C018DD67494DBBD9407A939C6C115D59B7
+      metadata.json     031CB801A5DDC68A7A62486BAF532CD614EE4A17DE13EFAF6D0CD5E78710B790
+      metrics.jsonl     870B54ABAB8D6139479E4D83E38F53E3577C3821634B3D932D43F59559E86407
+      val_metrics.jsonl 8FCDB328029F794B4C9151D91025FAB6B760294AF436A7DDCCC78686C49E5062
+
+The architecture has been implemented, but no meaningful capability
+improvement has yet been demonstrated.

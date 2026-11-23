@@ -56,7 +56,8 @@ def main() -> int:
     print("=" * 72)
     print(f"prompt tokens : {result['n_prompt_tokens']}")
     print(f"new tokens    : {result['n_new_tokens']}")
-    print(f"ttft          : {result['ttft_s'] * 1000:.1f} ms")
+    if result["ttft_s"] is not None:    # None when no token could be sampled
+        print(f"ttft          : {result['ttft_s'] * 1000:.1f} ms")
     if result.get("decode_tok_per_s"):
         print(f"decode speed  : {result['decode_tok_per_s']:.1f} tok/s")
     if "peak_vram_allocated_mb" in result:

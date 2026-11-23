@@ -9,7 +9,7 @@ description = "Domovoi Labs: research pipeline for capability-per-GiB language m
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.2",
+    "torch>=2.4",  # kv_cache.py: torch.is_autocast_enabled(device_type) / get_autocast_dtype
     "numpy>=1.26",
     "PyYAML>=6.0",
     "tqdm>=4.66",
@@ -19,6 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+corpora = ["pyarrow>=20"]
 # `datasets` is only needed by scripts/download_eval_data.py (benchmark data prep).
 # It is kept optional so the core pipeline has a minimal, stable dependency set.
 evals = [

@@ -8,7 +8,8 @@ Config schema (see configs/*.yaml):
 
     experiment:  name, notes, status
     model:       architecture, vocab_size, context_length, d_model,
-                 n_layers, n_heads, ffn_dim, dropout, tie_embeddings
+                 n_layers, n_heads, ffn_dim, dropout, tie_embeddings,
+                 recurrence_depth, recurrence_order (both optional)
     tokenizer:   type, path, version
     dataset:     name, source_url, version, train_fraction,
                  processed_dir
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import math
 import pathlib
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -59,6 +61,12 @@ class ModelSection:
     ffn_dim: int = 1728
     dropout: float = 0.0
     tie_embeddings: bool = True
+    # Shared-core recurrence (domovoi_recurrent_v1).  The defaults mean "no
+    # recurrence", so configs and checkpoints written before these keys
+    # existed load unchanged.  For domovoi_recurrent_v1, n_layers counts the
+    # *distinct* blocks and each is applied recurrence_depth times.
+    recurrence_depth: int = 1
+    recurrence_order: str = "cycle"
 
 
 @dataclass
@@ -95,6 +103,11 @@ class TrainingSection:
     eval_batches: int = 25
     checkpoint_interval: int = 500
     log_interval: int = 10
+    sampler: str = "random_offsets"
+    pilot_stop_checks: bool = False
+    pilot_calibrated_seconds: Optional[float] = None
+    extra_checkpoint_steps: tuple = ()
+    synchronize_cuda_timing: bool = False
 
 
 @dataclass
@@ -116,12 +129,31 @@ class Config:
     # ------------------------------------------------------------------
     def validate(self) -> None:
         """Raise ConfigError with a precise message if anything is wrong."""
+        # imported here, not at module top: the registry pulls in torch, and
+        # the single source of truth for valid names is the registry itself
+        from .models import ARCHITECTURES, RECURRENCE_ORDERS
+
         m, t, d = self.model, self.training, self.dataset
 
-        if m.architecture != "baseline_transformer":
+        if m.architecture not in ARCHITECTURES:
             raise ConfigError(
-                f"model.architecture must be 'baseline_transformer' for now; "
-                f"got {m.architecture!r}. Future architectures register here.")
+                f"model.architecture must be one of {sorted(ARCHITECTURES)}; "
+                f"got {m.architecture!r}.")
+        if isinstance(m.recurrence_depth, bool) or not isinstance(m.recurrence_depth, int) \
+                or m.recurrence_depth < 1:
+            raise ConfigError(
+                f"model.recurrence_depth must be an integer >= 1; got {m.recurrence_depth!r}.")
+        if m.recurrence_order not in RECURRENCE_ORDERS:
+            raise ConfigError(
+                f"model.recurrence_order must be one of {RECURRENCE_ORDERS}; "
+                f"got {m.recurrence_order!r}.")
+        if m.architecture == "baseline_transformer" and (
+                m.recurrence_depth != 1 or m.recurrence_order != "cycle"):
+            # the baseline would silently ignore these; refuse instead
+            raise ConfigError(
+                "model.recurrence_depth / recurrence_order only apply to "
+                "'domovoi_recurrent_v1'; leave them at their defaults (1, "
+                "'cycle') for 'baseline_transformer'.")
         if m.n_heads <= 0 or m.d_model % m.n_heads != 0:
             raise ConfigError(
                 f"model.d_model ({m.d_model}) must be divisible by "
@@ -137,6 +169,10 @@ class Config:
             raise ConfigError("dataset.train_fraction must be in (0, 1).")
         if t.steps <= 0:
             raise ConfigError("training.steps must be > 0.")
+        checkpoints = t.extra_checkpoint_steps
+        if (not isinstance(checkpoints, (list, tuple))
+                or any(type(step) is not int or not 1 <= step <= t.steps for step in checkpoints)):
+            raise ConfigError("training.extra_checkpoint_steps must contain steps within the run.")
         if t.batch_size <= 0 or t.gradient_accumulation <= 0:
             raise ConfigError("training.batch_size and gradient_accumulation must be > 0.")
         if t.context_length <= 0 or t.context_length > m.context_length:
@@ -148,6 +184,19 @@ class Config:
         if t.precision not in PRECISIONS:
             raise ConfigError(
                 f"training.precision must be one of {PRECISIONS}; got {t.precision!r}.")
+        if t.sampler not in ("random_offsets", "disjoint_segments"):
+            raise ConfigError("training.sampler must be random_offsets or disjoint_segments.")
+        if not isinstance(t.pilot_stop_checks, bool):
+            raise ConfigError("training.pilot_stop_checks must be a boolean.")
+        if not isinstance(t.synchronize_cuda_timing, bool):
+            raise ConfigError("training.synchronize_cuda_timing must be a boolean.")
+        seconds = t.pilot_calibrated_seconds
+        if seconds is not None and (
+            not t.pilot_stop_checks or type(seconds) not in (int, float)
+            or not math.isfinite(seconds) or seconds <= 0
+        ):
+            raise ConfigError("training.pilot_calibrated_seconds requires enabled pilot stop "
+                              "checks and a finite positive duration.")
         if not 0.0 <= t.min_lr_ratio <= 1.0:
             raise ConfigError("training.min_lr_ratio must be in [0, 1].")
         if t.warmup_steps < 0 or t.warmup_steps > t.steps:

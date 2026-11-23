@@ -134,12 +134,22 @@ def generate_report(
                  f"layers={meta['config']['model']['n_layers']}, "
                  f"heads={meta['config']['model']['n_heads']}, "
                  f"context={meta['config']['model']['context_length']})")
+    # older experiments predate the recurrence keys; absent means depth 1
+    depth = meta['config']['model'].get('recurrence_depth', 1)
+    if depth != 1:
+        lines.append(f"- shared-core recurrence: each of the {meta['config']['model']['n_layers']} "
+                     f"stored blocks applied {depth}x "
+                     f"(order={meta['config']['model'].get('recurrence_order')}, "
+                     f"effective depth={meta['config']['model']['n_layers'] * depth})")
     lines.append("")
     lines.append("## Parameters")
     lines.append("")
     lines.append(f"- total: {_params_human(params.get('total') or meta.get('parameters'))}")
     lines.append(f"- trainable: {_params_human(params.get('trainable'))}")
     lines.append(f"- active per token: {_params_human(params.get('active_per_token') or meta.get('active_parameters'))}")
+    applied = params.get('applied_per_token') or meta.get('applied_parameters')
+    if applied is not None:
+        lines.append(f"- applied per token (reuse counted): {_params_human(applied)}")
     if profile.get("checkpoint_size_mb") is not None:
         lines.append(f"- checkpoint size: {profile['checkpoint_size_mb']} MiB")
     lines.append("")

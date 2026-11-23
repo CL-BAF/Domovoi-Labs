@@ -1,0 +1,244 @@
+DOMOVOI LABS — CODEX VERIFICATION RESULTS
+23 November 2026 | Windows PowerShell | CPU-only
+
+Suite commands and results
+  $env:PYTHONDONTWRITEBYTECODE=1
+  $env:OMP_NUM_THREADS=1
+  $env:MKL_NUM_THREADS=1
+  .venv\Scripts\python.exe -c 'import sys,torch; print(sys.version,torch.__version__,torch.version.cuda)'
+  .venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+  .venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests/test_recurrent.py
+  .venv\Scripts\python.exe scripts/plan_recurrent_experiments.py
+
+Python was 3.13.17 (tags/v3.13.17:64e080d, Oct 21 2026, 14:08:53)
+[MSC v.1944 64 bit (AMD64)]. Torch 2.15.0+cpu, torch.version.cuda None.
+Full workspace 138 passed in 3.06s. Dedicated file 63 passed in 1.99s.
+Planner dry-run printed 10 arms, no files written. Estimated train
+GFLOP/token rounded: B02 0.066, B04 and R02x2 0.116, B08 and R02x4
+0.216, B16 and R02x8 0.417.
+
+Upstream commands (run from workspace root)
+  (Invoke-RestMethod 'https://api.github.com/repos/CL-BAF/Domovoi-Labs/commits/main').sha
+  $p=Join-Path $env:TEMP ('domovoi-audit-'+[guid]::NewGuid())
+  New-Item -ItemType Directory $p | Out-Null
+  Invoke-WebRequest -UseBasicParsing 'https://codeload.github.com/CL-BAF/Domovoi-Labs/zip/5e76fc78bbe9a5c12690e84d7c29e558248e6feb' -OutFile (Join-Path $p 'upstream.zip')
+  Expand-Archive (Join-Path $p 'upstream.zip') $p
+  $py=(Resolve-Path .venv\Scripts\python.exe).Path
+  Push-Location (Get-ChildItem $p -Directory).FullName
+  & $py -m pytest -q -p no:cacheprovider
+  Pop-Location
+
+Upstream 75 passed in 2.56s using the same CPU environment variables above.
+Git commands 'git status -sb' and 'git remote -v' failed because Git was not
+on PATH. The first Windows wildcard rg source listing failed and was rerun
+with directory roots and -g '*.py'. Compared relevant source using rg --files
+and Get-FileHash, and baseline text with fc.exe /n.
+
+Independent probes below use the exact Python bodies executed via PowerShell
+here-strings. Run each independently from the workspace root. Set
+PYTHONDONTWRITEBYTECODE=1, OMP_NUM_THREADS=1, MKL_NUM_THREADS=1 as above.
+For probes C and D append the unpacked upstream directory as an argument.
+The actual unpacked path was
+  $env:TEMP\domovoi-audit-1142e74b-1987-42e1-a139-4a494cf80c53\Domovoi-Labs-5e76fc78bbe9a5c12690e84d7c29e558248e6feb
+
+Probe A — FP64 scheduling, cache and gradient checks
+Observed 96 cached chunk cases, max logit delta 2.220446049250313e-16,
+causal prefix delta 0.0, tied gradient delta 6.938893903907228e-18.
+Prefill 28,800 logical bytes vs 43,200 underlying storage bytes. Inconsistent
+prefix accepted and changed logits by 0.004358432734755946.
+Empty cache raised IndexError. One beyond the context boundary correctly
+raised ValueError in each valid chunking case.
+
+@'
+import torch, copy, math
+from dataclasses import replace
+from types import SimpleNamespace
+from domovoi.models import build_model
+from domovoi.profiling import architecture_accounting
+torch.set_num_threads(1)
+err = leak = grad_err = 0.
+cases = 0
+for seed in (19, 71):
+ for n in (1, 3):
+  for depth in (1, 2, 5):
+   for order in ('cycle','sequence'):
+    torch.manual_seed(seed)
+    c=SimpleNamespace(architecture='domovoi_recurrent_v1',vocab_size=43,context_length=23,d_model=24,n_heads=3,ffn_dim=37,n_layers=n,dropout=0.,tie_embeddings=bool(seed==19),recurrence_depth=depth,recurrence_order=order)
+    m=build_model(c).double()
+    sched=list(range(n))*depth if order=='cycle' else sorted(list(range(n))*depth)
+    assert m.application_schedule()==sched
+    seen=[]
+    hooks=[b.register_forward_pre_hook(lambda mod,args: seen.append(id(mod.attn.qkv.weight))) for b in m.blocks]
+    x=torch.randint(43,(2,23))
+    y=x.clone(); y[:,11:]=(y[:,11:]+1)%43
+    with torch.no_grad():
+     full=m(x).logits
+     assert seen==[id(m.blocks[i].attn.qkv.weight) for i in sched]
+     for h in hooks: h.remove()
+     leak=max(leak,(m(y).logits[:,:11]-full[:,:11]).abs().max().item())
+     for chunks in ((1,)*23,(5,7,1,10),(22,1),(23,)):
+      p=0; cache=None
+      for k in chunks:
+       out=m(x[:,p:p+k],caches=cache,use_cache=True)
+       err=max(err,(out.logits-full[:,p:p+k]).abs().max().item())
+       cache=out.caches; p+=k
+       assert len(cache)==len(sched)
+       assert len({v.untyped_storage().data_ptr() for _,v in cache})==len(sched)
+      cases+=1
+     try: m(x[:,:1],caches=cache)
+     except ValueError: pass
+     else: raise AssertionError('overflow accepted')
+    d,f,V=24,37,43
+    expected=(V+23)*d+2*d+n*(4*d*d+2*d*f+9*d+f)+(0 if c.tie_embeddings else V*d)
+    assert sum(p.numel() for p in m.parameters())==expected==architecture_accounting(c)['unique_params']
+    assert architecture_accounting(c)['est_forward_flops_per_token']==len(sched)*(8*d*d+4*d*f+4*d*23)+2*V*d
+    if depth==1:
+     old=copy.copy(c); old.architecture='baseline_transformer'
+     torch.manual_seed(seed); b=build_model(old).double()
+     assert all(torch.equal(v,b.state_dict()[k]) for k,v in m.state_dict().items())
+    copies=[copy.deepcopy(m.blocks[i]) for i in sched]
+    z=(m.wte(x)+m.wpe(torch.arange(23))).detach()
+    for b in copies: z,_=b(z)
+    m.lm_head(m.ln_f(z)).square().mean().backward()
+    m(x).logits.square().mean().backward()
+    for i, block in enumerate(m.blocks):
+     for key,p in block.named_parameters():
+      summed=sum(dict(b.named_parameters())[key].grad for j,b in zip(sched,copies) if j==i)
+      grad_err=max(grad_err,(p.grad-summed).abs().max().item())
+assert max(err,leak,grad_err)<1e-12
+print('cases',cases,'max_logit_delta',err,'future_delta',leak,'gradient_delta',grad_err)
+m.eval()
+with torch.no_grad():
+ x=torch.randint(43,(1,8)); a=m(x[:,:5],use_cache=True).caches
+ print('prefill logical bytes',sum(t.numel()*t.element_size() for pair in a for t in pair),'retained storage bytes',sum(s.nbytes() for pair in a for s in {pair[0].untyped_storage(),pair[1].untyped_storage()}))
+ a[1]=(a[1][0][:,:,:2],a[1][1][:,:,:2])
+ print('bad prefix accepted delta', (m(x[:,5:],caches=a).logits-m(x).logits[:,5:]).abs().max().item())
+ try: m(x,caches=[])
+ except Exception as e: print('empty cache',type(e).__name__)
+'@ | .venv\Scripts\python.exe -
+
+FP32 rerun used the same body before the final m.eval() line, removed both
+.double() calls and changed the final tolerance to 2e-6. Observed 96 cases,
+max logit delta 1.1920928955078125e-07, future delta 0.0, gradient delta
+7.450580596923828e-09. Thresholds are absolute for these small CPU models.
+
+Probe B — checkpoint and context sweep
+First draft omitted required optimizer and scheduler objects. It failed with
+AttributeError at checkpoint.py:72 in a temporary directory. The corrected
+probe supplied AdamW and LambdaLR with no optimizer steps and seeded the
+model with 31. Exact inference reconstruction passed; same-shape changed
+schedule accepted with max logit delta 0.17750859260559082. A character
+tokenizer variant yielded [(16, 16), (32, 32)], and the word-count tokenizer
+below yielded [(16, 9), (32, 9)].
+
+@'
+from tempfile import TemporaryDirectory
+from pathlib import Path
+import torch
+from domovoi.config import load_config, clone_config
+from domovoi.models import build_model
+from domovoi.training.checkpoint import save_checkpoint, load_checkpoint, build_model_from_checkpoint
+from domovoi.profiling.profiler import profile_context_sweep
+torch.set_num_threads(1)
+torch.manual_seed(31)
+base=load_config("configs/smoke_test.yaml")
+c=clone_config(base, model=dict(architecture="domovoi_recurrent_v1",n_layers=2,recurrence_depth=2))
+d=clone_config(c,model=dict(recurrence_depth=3,recurrence_order="sequence"))
+m=build_model(c.model).eval()
+x=torch.arange(8)[None]
+with TemporaryDirectory() as temp:
+ path=Path(temp)/'test'
+ opt=torch.optim.AdamW(m.parameters()); sch=torch.optim.lr_scheduler.LambdaLR(opt,lambda _:1)
+ save_checkpoint(path,m,opt,sch,step=1,tokens_seen=8,config=c)
+ restored, _, _=build_model_from_checkpoint(path); restored.eval()
+ assert torch.equal(restored(x).logits,m(x).logits)
+ changed=build_model(d.model).eval()
+ load_checkpoint(path,changed,restore_rng=False)
+ print("changed schedule accepted; logit delta", (changed(x).logits-m(x).logits).abs().max().item())
+class CharTokenizer:
+ def encode(self,s): return [1 for _ in s.split()]
+ def decode(self,t): return ''.join(chr(i+64) for i in t)
+ print_unused=False
+print("sweep",[(i['target_tokens'],i['actual_prompt_tokens']) for i in profile_context_sweep(m,CharTokenizer(),torch.device('cpu'),[16,32],0)])
+'@ | .venv\Scripts\python.exe -
+
+Probe C — upstream behavior, 8K arithmetic, artifacts, documentation quotes
+Observed exact original/current baseline equivalence across four combinations,
+69,589,248 vs 15,581,056 parameters and 132.73095703125 vs 29.718505859375 MiB
+BF16 weights, each with 320.0 MiB logical KV. Four historical files identical
+and 694 source quotations matched. Assign $u to extracted snapshot path.
+
+@'
+import re, pathlib, importlib.util, sys, torch
+from types import SimpleNamespace
+from domovoi.models import build_model
+from domovoi.profiling import architecture_accounting
+root=pathlib.Path(sys.argv[1])
+spec=importlib.util.spec_from_file_location("original_baseline",root/"domovoi/models/baseline_transformer.py")
+old=importlib.util.module_from_spec(spec); sys.modules[spec.name]=old; spec.loader.exec_module(old)
+for tie in (False,True):
+ c=SimpleNamespace(architecture="baseline_transformer", vocab_size=29, context_length=12,d_model=16,n_layers=3,n_heads=4,ffn_dim=31,dropout=.2,tie_embeddings=tie)
+ torch.manual_seed(7); a=old.build_baseline_transformer(c)
+ torch.manual_seed(7); b=build_model(c)
+ assert all(torch.equal(v,b.state_dict()[k]) for k,v in a.state_dict().items())
+ x=torch.arange(12)[None]
+ for train in (False,True):
+  a.train(train); b.train(train)
+  torch.manual_seed(13); p=a(x,targets=x,use_cache=True)
+  torch.manual_seed(13); o=b(x,targets=x,use_cache=True)
+  assert torch.equal(p.logits,o.logits) and torch.equal(p.loss,o.loss)
+  assert all(torch.equal(i,j) for u,v in zip(p.caches,o.caches) for i,j in zip(u,v))
+print("upstream exact: tie x mode = 4")
+for n in (16,2):
+ c=SimpleNamespace(vocab_size=4096, context_length=8192,d_model=640,n_layers=n,ffn_dim=1728,tie_embeddings=True,recurrence_depth=16//n)
+ a=architecture_accounting(c); print(n,a['unique_params'],a['weight_bytes']/2**20,a['kv_cache_bytes_full_context']/2**20)
+for path in pathlib.Path('experiments/DML-0001').iterdir():
+ print(path.name, path.read_bytes()==(root/path).read_bytes())
+p=None; mismatches=[]; total=0
+for i,s in enumerate(pathlib.Path('ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt').read_text(encoding='utf-8').splitlines(),1):
+ if s.startswith('FILE: '): p=pathlib.Path(s.split()[1]).read_text(encoding='utf-8').splitlines()
+ m=re.match(r'\s+(\d+)\s+\| ?(.*)',s)
+ if p is not None and m:
+  n=int(m[1]); total+=1
+  if n>len(p) or p[n-1].strip()!=m[2].strip(): mismatches.append((i,n,m[2]))
+print("numbered snippets",total,"mismatch",len(mismatches),mismatches[:8])
+'@ | .venv\Scripts\python.exe - $u
+
+Probe D — coverage against pinned revision
+All 12 listed source files had empty missing-line lists. Blank lines and
+deleted source rows were outside this coverage definition. For PowerShell
+here-strings, put the opening and closing delimiters at the left margin.
+
+@'
+from pathlib import Path
+import re,sys,difflib
+u=Path(sys.argv[1]); p=None; covered={}
+for l in Path('ARCHITECTURE_IMPLEMENTATION_EXPLAINED.txt').read_text(encoding='utf-8').splitlines():
+ if l.startswith('FILE: '):
+  p=Path(l.split()[1]); covered[p]=set()
+ if p is None: continue
+ m=re.match(r'\s+(\d+)\s+\|',l)
+ if m: covered[p].add(int(m[1]))
+ m=re.match(r'\s*LINES?\s+(\d+)(?:\s*[-–]\s*(\d+))?',l)
+ if m: covered[p].update(range(int(m[1]),int(m[2] or m[1])+1))
+for p, seen in covered.items():
+ new=p.read_text(encoding='utf-8').splitlines()
+ old=(u/p).read_text(encoding='utf-8').splitlines() if (u/p).exists() else []
+ missing=[i+1 for tag,a,b,c,d in difflib.SequenceMatcher(None,old,new,autojunk=False).get_opcodes() if tag!='equal' for i in range(c,d) if new[i].strip() and i+1 not in seen]
+ print(p,missing)
+'@ | .venv\Scripts\python.exe - $u
+
+Artifact hashes before and after audit
+  Get-ChildItem experiments -Recurse -File | Get-FileHash | Format-List Hash,Path
+  config.yaml      064E08911F75360085C7A3E0E75C02C018DD67494DBBD9407A939C6C115D59B7
+  metadata.json    031CB801A5DDC68A7A62486BAF532CD614EE4A17DE13EFAF6D0CD5E78710B790
+  metrics.jsonl    870B54ABAB8D6139479E4D83E38F53E3577C3821634B3D932D43F59559E86407
+  val_metrics.jsonl 8FCDB328029F794B4C9151D91025FAB6B760294AF436A7DDCCC78686C49E5062
+
+Limits
+No original DML-0001 checkpoint was available. No CUDA timing, GPU memory
+or trained quality was verified. Historical absence of private recurrent
+training is unverified. CPU smoke tests include temporary synthetic training.
+No dataset or model downloads occurred. The upstream download was source
+plus the four publicly tracked historical artifacts. No production code,
+configs, experiment results or statuses were changed.

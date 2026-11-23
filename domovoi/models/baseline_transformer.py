@@ -30,6 +30,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .kv_cache import ApplicationCache, validate_caches
+
 
 @dataclass
 class BaselineTransformerConfig:
@@ -134,6 +136,8 @@ class Block(nn.Module):
 
 
 class BaselineTransformer(nn.Module):
+    architecture_id = "baseline_transformer"   # registry name; used in signatures
+
     def __init__(self, cfg: BaselineTransformerConfig):
         super().__init__()
         self.cfg = cfg
@@ -157,13 +161,24 @@ class BaselineTransformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.cfg.initializer_range)
 
-    # GPT-2 style: scale down residual-path output projections by sqrt(depth)
+    # GPT-2 style: scale down residual-path output projections by sqrt(depth).
+    # "depth" is the number of block *applications* (== n_layers here; larger
+    # for weight-shared models that apply a block several times).
     def _rescale_residual_projections(self):
+        depth = len(self.application_schedule())
         for block in self.blocks:
             nn.init.normal_(block.attn.proj.weight, mean=0.0,
-                            std=self.cfg.initializer_range / math.sqrt(2 * self.cfg.n_layers))
+                            std=self.cfg.initializer_range / math.sqrt(2 * depth))
             nn.init.normal_(block.mlp.proj.weight, mean=0.0,
-                            std=self.cfg.initializer_range / math.sqrt(2 * self.cfg.n_layers))
+                            std=self.cfg.initializer_range / math.sqrt(2 * depth))
+
+    def application_schedule(self) -> list[int]:
+        """Index into self.blocks of the block applied at each depth position.
+
+        Conventional Transformer: every stored block exactly once, in order.
+        Weight-shared subclasses override this.  The KV cache always holds one
+        (k, v) entry per *application*, never per stored block."""
+        return list(range(len(self.blocks)))
 
     # ------------------------------------------------------------------
     def forward(
@@ -175,31 +190,26 @@ class BaselineTransformer(nn.Module):
     ) -> ModelOutput:
         """idx: (B, T) token ids.  targets: (B, T) next-token ids.
 
-        caches: optional per-layer (k, v) tuples from a previous call.  When
+        caches: optional per-application (k, v) tuples from a previous call
+        (one per entry of application_schedule()).  When
         given, idx contains only the *new* tokens; positions resume after the
         cached prefix.
         """
         B, T = idx.shape
-        max_len = self.cfg.context_length
-        if caches is not None:
-            prefix_len = caches[0][0].size(2) if caches[0] is not None else 0
-        else:
-            prefix_len = 0
-        total_len = prefix_len + T
-        if total_len > max_len:
-            raise ValueError(
-                f"Sequence length {total_len} exceeds context_length {max_len}. "
-                f"(prefix {prefix_len} + new {T})")
+        # count, provenance, shapes, batch, heads, device, dtype, equal
+        # prefix in every slot and the context bound; raises a ValueError
+        prefix_len = validate_caches(self, idx, caches)
 
         # positions for the new tokens continue after the cached prefix
         pos = torch.arange(prefix_len, prefix_len + T, device=idx.device)
         x = self.wte(idx) + self.wpe(pos)
 
+        schedule = self.application_schedule()
         if caches is None:
-            caches = [None] * len(self.blocks)
-        new_caches = [] if use_cache else None
-        for block, cache in zip(self.blocks, caches):
-            x, new_cache = block(x, cache=cache)
+            caches = [None] * len(schedule)
+        new_caches = ApplicationCache(model=self, schedule=schedule) if use_cache else None
+        for block_idx, cache in zip(schedule, caches):
+            x, new_cache = self.blocks[block_idx](x, cache=cache)
             if use_cache:
                 new_caches.append(new_cache)
 

@@ -7,7 +7,9 @@ top-k and top-p sampling.
 
 Speed measurement: prefill (first forward over the prompt) and decode (the
 per-token loop) are timed separately, so time-to-first-token, prefill tok/s
-and decode tok/s are all real measurements, never estimates.  The first new
+and decode tok/s are all real measurements, never estimates.  On CUDA the
+clock is read only after torch.cuda.synchronize, and TTFT runs until the
+first token id is on the host (prefill + first sampling).  The first new
 token is sampled from the prefill logits, so it is NOT counted in
 decode_tok_per_s — that number covers exactly the forwards that were timed
 (and is null when the decode loop never ran, rather than fabricating one).
@@ -65,10 +67,30 @@ def _sample_next(logits: torch.Tensor, temperature: float, top_k: int,
     return int(torch.multinomial(probs, 1, generator=generator).item())
 
 
+def _sync(device: torch.device) -> None:
+    """CUDA launches are asynchronous: without a sync, perf_counter measures
+    the launch, not the work (audit DML-A03).  No-op on CPU."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def cache_bytes(caches) -> dict:
+    """Exact byte counts of a KV cache (counted from the tensors, not
+    estimated).  logical = bytes of the K/V views themselves; storage =
+    bytes of the distinct underlying buffers they keep alive.  After
+    prefill K/V are views into the fused QKV output, so storage > logical."""
+    if not caches:
+        return {"kv_cache_logical_bytes": 0, "kv_cache_storage_bytes": 0}
+    tensors = [t for pair in caches for t in pair]
+    storages = {t.untyped_storage().data_ptr(): t.untyped_storage().nbytes() for t in tensors}
+    return {"kv_cache_logical_bytes": sum(t.numel() * t.element_size() for t in tensors),
+            "kv_cache_storage_bytes": sum(storages.values())}
+
+
 @torch.no_grad()
 def generate(
     model,
-    prompt: str,
+    prompt: Optional[str],
     tokenizer,
     max_new_tokens: int = 128,
     temperature: float = 1.0,
@@ -76,16 +98,27 @@ def generate(
     top_p: float = 1.0,
     seed: Optional[int] = None,
     device: Optional[torch.device] = None,
+    prompt_ids: Optional[list[int]] = None,
+    reset_peak: bool = True,
 ) -> dict:
     """Generate continuation of `prompt`.  Returns a result dict:
 
         text           - prompt + generated text
         new_text       - only the generated part
         n_prompt_tokens, n_new_tokens
-        ttft_s         - time to first token (prefill forward)
+        prefill_s      - prefill forward, CUDA-synchronized
+        ttft_s         - time to first token: prefill forward + sampling the
+                         first token (None if no token could be sampled)
         prefill_tok_per_s, decode_tok_per_s  (decode_tok_per_s is None when
         the decode loop produced no tokens, e.g. max_new_tokens <= 1)
         decode_s       - seconds spent in the decode loop
+        final_sequence_length, kv_cache_*_bytes, effective_depth,
+        weight_dtype, kv_dtype
+
+    prompt_ids: exact token ids to use instead of encoding `prompt` (the
+    profiler needs exact lengths; text re-encoding can change them).
+    reset_peak: reset CUDA peak-memory stats first (the profiler turns this
+    off to take one peak across several runs).
     """
     if max_new_tokens < 0:
         raise ValueError(f"max_new_tokens must be >= 0; got {max_new_tokens}")
@@ -93,7 +126,12 @@ def generate(
         set_seed(seed)
     device = device or next(model.parameters()).device
 
-    prompt_ids = tokenizer.encode(prompt)
+    if prompt_ids is None:
+        prompt_ids = tokenizer.encode(prompt)
+    else:
+        prompt_ids = [int(i) for i in prompt_ids]
+        if prompt is None:
+            prompt = tokenizer.decode(prompt_ids)
     if not prompt_ids:
         raise ValueError("Prompt tokenized to zero tokens; provide a non-empty prompt.")
     ctx_len = model.cfg.context_length
@@ -105,7 +143,7 @@ def generate(
 
     # reset CUDA peak-memory tracking so the profile of *this* generation is
     # measurable (real stats, not guesses)
-    if device.type == "cuda":
+    if device.type == "cuda" and reset_peak:
         torch.cuda.reset_peak_memory_stats(device)
 
     # sampling generator must live on the same device as the logits
@@ -114,10 +152,13 @@ def generate(
         gen.manual_seed(seed)
 
     # ---- prefill -----------------------------------------------------
+    _sync(device)
     t0 = time.perf_counter()
     out = model(x, use_cache=True)
     caches = out.caches
-    ttft = time.perf_counter() - t0
+    _sync(device)
+    prefill_s = time.perf_counter() - t0
+    ttft = None
 
     # a token sampled after a forward that leaves cache length L occupies
     # sequence position L, so it is inside the context window only if
@@ -129,6 +170,9 @@ def generate(
     if max_new_tokens >= 1 and len(prompt_ids) < ctx_len:
         next_tok = _sample_next(out.logits[0, -1], temperature, top_k, top_p, gen)
         new_ids.append(next_tok)
+        # .item() inside sampling already waits for the device; the first
+        # token id is now on the host
+        ttft = time.perf_counter() - t0
 
     t1 = time.perf_counter()
     for _ in range(max_new_tokens - 1):
@@ -141,6 +185,7 @@ def generate(
         next_tok = _sample_next(out.logits[0, -1], temperature, top_k, top_p, gen)
         new_ids.append(next_tok)
         decode_ids.append(next_tok)
+    _sync(device)
     decode_s = time.perf_counter() - t1
 
     n_new = len(new_ids)
@@ -151,13 +196,22 @@ def generate(
         "new_text": tokenizer.decode(new_ids),
         "n_prompt_tokens": len(prompt_ids),
         "n_new_tokens": n_new,
-        "ttft_s": round(ttft, 6),
-        "prefill_tok_per_s": round(len(prompt_ids) / max(1e-9, ttft), 1),
+        "prefill_s": round(prefill_s, 6),
+        "ttft_s": round(ttft, 6) if ttft is not None else None,
+        "prefill_tok_per_s": round(len(prompt_ids) / max(1e-9, prefill_s), 1),
         # decode throughput covers exactly the timed decode-loop tokens;
         # the prefill-sampled first token belongs to the prefill measurement
         "decode_tok_per_s": round(n_decode / max(1e-9, decode_s), 1)
             if n_decode else None,
         "decode_s": round(decode_s, 6),
+        # tokens held in the KV cache after the last forward (the sampled
+        # final token is never fed back, so it is not cached)
+        "final_sequence_length": caches[0][0].size(2),
+        **cache_bytes(caches),
+        "effective_depth": len(caches),
+        # weights and K/V can differ (FP32 weights, bf16 K/V under autocast)
+        "weight_dtype": str(next(model.parameters()).dtype),
+        "kv_dtype": str(caches[0][0].dtype),
         "settings": {
             "temperature": temperature, "top_k": top_k, "top_p": top_p,
             "max_new_tokens": max_new_tokens, "seed": seed,

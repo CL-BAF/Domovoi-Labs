@@ -47,18 +47,50 @@ class PackedTokenData:
         # the corpus and crash on an exactly-minimum-sized file).
         ix = torch.randint(self.n_tokens - block_size, (batch_size,),
                            generator=generator)
+        return self.batch_at(ix.tolist(), block_size, device)
+
+    def batch_at(self, offsets: list[int], block_size: int,
+                 device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         x = torch.stack([
             torch.from_numpy(self.data[i:i + block_size].astype(np.int64))
-            for i in ix.tolist()
+            for i in offsets
         ])
         y = torch.stack([
             torch.from_numpy(self.data[i + 1:i + 1 + block_size].astype(np.int64))
-            for i in ix.tolist()
+            for i in offsets
         ])
         if device.type == "cuda":
             return x.pin_memory().to(device, non_blocking=True), \
                    y.pin_memory().to(device, non_blocking=True)
         return x.to(device), y.to(device)
+
+
+class DisjointSegmentSampler:
+    """One seeded pass over disjoint (context + 1)-token segments."""
+
+    def __init__(self, n_tokens: int, context: int, seed: int, required: int):
+        self.stride = context + 1
+        available = n_tokens // self.stride
+        if required > available:
+            raise ValueError(
+                f"Training requires {required} disjoint segments of {self.stride} tokens; "
+                f"packed train split contains {available} complete segments.")
+        generator = torch.Generator().manual_seed(seed)
+        self.order = torch.randperm(available, generator=generator)
+        self.position = 0
+
+    def restore(self, position: int) -> None:
+        if type(position) is not int or not 0 <= position <= len(self.order):
+            raise ValueError(f"Invalid disjoint segment sampler position {position!r}.")
+        self.position = position
+
+    def take(self, batch_size: int) -> list[int]:
+        end = self.position + batch_size
+        if end > len(self.order):
+            raise RuntimeError("Disjoint training segments exhausted.")
+        offsets = (self.order[self.position:end] * self.stride).tolist()
+        self.position = end
+        return offsets
 
 
 def fixed_val_generator(device: torch.device) -> torch.Generator:

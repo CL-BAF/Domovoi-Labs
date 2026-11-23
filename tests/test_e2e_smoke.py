@@ -73,7 +73,9 @@ def test_end_to_end_smoke(smoke_dataset, tmp_path):
 
     # ---------- 5. resume for one more step -----------------------------
     cfg.training.steps = 5
-    trainer_r = Trainer(cfg, experiment_dir=exp_dir, resume=True, device=cpu)
+    # lengthening a run changes its LR schedule: explicit opt-in since round 4
+    trainer_r = Trainer(cfg, experiment_dir=exp_dir, resume=True, device=cpu,
+                        extend_steps=True)
     assert trainer_r.start_step == 4
     summary_r = trainer_r.train()
     assert summary_r["status"] == "COMPLETED"
