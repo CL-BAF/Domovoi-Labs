@@ -6,6 +6,9 @@ import pytest
 from tokenizers import Tokenizer
 
 from domovoi.datasets import streaming
+from domovoi.config import config_from_dict
+from domovoi.training import Trainer
+from domovoi.training.checkpoint import CheckpointError
 
 
 def spec(tmp_path):
@@ -101,3 +104,19 @@ def test_mixture_records_document_quotas(tmp_path):
     result = streaming.prepare_streaming(settings, tmp_path / "mixed")
     assert result["documents"]["train"] == 3
     assert result["mixture"]["document_weights"] == {"fixture": 2 / 3, "extra": 1 / 3}
+
+
+def test_verified_checkpoint_rejects_corrupted_optimizer(smoke_dataset):
+    settings = smoke_dataset["config_dict"]
+    settings["training"]["verify_checkpoint_writes"] = True
+    settings["training"]["synchronize_cuda_timing"] = True
+    exp = smoke_dataset["tmp_path"] / "verified"
+    cfg = config_from_dict(settings)
+    trainer = Trainer(cfg, experiment_dir=exp)
+    assert trainer.train()["status"] == "COMPLETED"
+    checkpoint = trainer.ckpt.latest()
+    state = checkpoint / "optimizer.pt"
+    with state.open("ab") as f:
+        f.write(b"corruption")
+    with pytest.raises(CheckpointError, match="checksum mismatch"):
+        Trainer(cfg, experiment_dir=exp, resume=True)

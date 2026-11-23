@@ -157,7 +157,8 @@ _CHANGES = {"steps": 8, "batch_size": 3, "gradient_accumulation": 2, "context_le
             "betas": [0.8, 0.95], "grad_clip": 0.5, "warmup_steps": 2,
             "precision": "bf16", "seed": 7, "eval_batches": 3,
             "sampler": "disjoint_segments", "pilot_stop_checks": True,
-            "pilot_calibrated_seconds": 180.0}
+            "pilot_calibrated_seconds": 180.0, "deterministic_cuda": True,
+            "verify_checkpoint_writes": True}
 
 
 def test_every_trajectory_field_is_covered():

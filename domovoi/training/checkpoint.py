@@ -27,8 +27,10 @@ import time
 from typing import NamedTuple, Optional
 
 import torch
+from safetensors import safe_open
 from safetensors.torch import save_file
 
+from ..datasets.tokenizer import sha256_file
 from ..models.signature import config_signature, model_signature, signature_differences
 from ..utils.seeding import capture_rng_state, restore_rng_state
 
@@ -43,6 +45,22 @@ def read_checkpoint_meta(ckpt_dir: str | pathlib.Path) -> dict:
     if not (ckpt_dir / "checkpoint.json").is_file():
         raise CheckpointError(f"No checkpoint found at {ckpt_dir}")
     return json.loads((ckpt_dir / "checkpoint.json").read_text(encoding="utf-8"))
+
+
+def verify_checkpoint_files(ckpt_dir: pathlib.Path, meta: dict) -> None:
+    required = (meta.get("config", {}).get("training", {}).get("verify_checkpoint_writes", False))
+    reported = meta.get("files_sha256")
+    if reported is None and not required:
+        return
+    expected = {"model.safetensors", "optimizer.pt", "scheduler.pt", "rng.pt"}
+    if (ckpt_dir / "scaler.pt").is_file():
+        expected.add("scaler.pt")
+    if not isinstance(reported, dict) or set(reported) != expected:
+        raise CheckpointError(f"Invalid checkpoint file manifest at {ckpt_dir}")
+    for name, digest in reported.items():
+        path = ckpt_dir / name
+        if not path.is_file() or sha256_file(path) != digest:
+            raise CheckpointError(f"Checkpoint checksum mismatch: {path}")
 
 
 def saved_signature(meta: dict, ckpt_dir) -> dict:
@@ -151,6 +169,13 @@ def save_checkpoint(
         "model_signature": model_signature(model),
         **(extra or {}),
     }
+    if getattr(config.training, "verify_checkpoint_writes", False):
+        with safe_open(str(tmp_dir / "model.safetensors"), framework="pt", device="cpu") as model_file:
+            if set(model_file.keys()) != set(state):
+                raise CheckpointError(f"Staged checkpoint has unexpected tensors at {tmp_dir}")
+        files = ("model.safetensors", "optimizer.pt", "scheduler.pt", "rng.pt", "scaler.pt")
+        meta["files_sha256"] = {name: sha256_file(tmp_dir / name) for name in files
+                                if (tmp_dir / name).is_file()}
     (tmp_dir / "checkpoint.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     # crash-safe directory swap: rename the previous version aside (a plain
@@ -188,6 +213,7 @@ def load_checkpoint(
     ckpt_dir = pathlib.Path(ckpt_dir)
     # architecture/schedule check BEFORE any tensor reaches the model
     meta = read_checkpoint_meta(ckpt_dir)
+    verify_checkpoint_files(ckpt_dir, meta)
     verify_checkpoint_architecture(meta, model, ckpt_dir)
 
     from safetensors.torch import load_file
@@ -234,6 +260,7 @@ def build_model_from_checkpoint(ckpt_dir: str | pathlib.Path):
 
     ckpt_dir = pathlib.Path(ckpt_dir)
     meta = read_checkpoint_meta(ckpt_dir)
+    verify_checkpoint_files(ckpt_dir, meta)
     cfg = config_from_dict(meta["config"])
     model = build_model(cfg.model)
     # the rebuilt model must run the schedule recorded at save time (guards
@@ -257,9 +284,13 @@ class CheckpointManager:
     def save(self, step: int, **kwargs) -> pathlib.Path:
         name = f"step_{step:08d}"
         path = self.root / name
+        if path.exists() and getattr(kwargs["config"].training, "verify_checkpoint_writes", False):
+            raise CheckpointError(f"Refusing to overwrite verified checkpoint at {path}")
         save_checkpoint(path, step=step, **kwargs)
-        (self.root / "latest.json").write_text(
+        index_tmp = self.root / "latest.json.tmp"
+        index_tmp.write_text(
             json.dumps({"step": step, "path": name}, indent=2), encoding="utf-8")
+        index_tmp.replace(self.root / "latest.json")
         return path
 
     def latest(self) -> pathlib.Path | None:

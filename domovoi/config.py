@@ -108,6 +108,8 @@ class TrainingSection:
     pilot_calibrated_seconds: Optional[float] = None
     extra_checkpoint_steps: tuple = ()
     synchronize_cuda_timing: bool = False
+    deterministic_cuda: bool = False
+    verify_checkpoint_writes: bool = False
 
 
 @dataclass
@@ -190,6 +192,8 @@ class Config:
             raise ConfigError("training.pilot_stop_checks must be a boolean.")
         if not isinstance(t.synchronize_cuda_timing, bool):
             raise ConfigError("training.synchronize_cuda_timing must be a boolean.")
+        if not isinstance(t.deterministic_cuda, bool) or not isinstance(t.verify_checkpoint_writes, bool):
+            raise ConfigError("Deterministic CUDA and checkpoint verification flags must be booleans.")
         seconds = t.pilot_calibrated_seconds
         if seconds is not None and (
             not t.pilot_stop_checks or type(seconds) not in (int, float)

@@ -19,6 +19,7 @@ write summary.json → set status COMPLETED (or FAILED / INTERRUPTED).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -50,6 +51,8 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if cfg.training.deterministic_cuda:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     if args.pilot_deadline is not None and not cfg.training.pilot_stop_checks:
         ap.error("--pilot-deadline requires enabled pilot stop checks")
     env = collect_env_info()

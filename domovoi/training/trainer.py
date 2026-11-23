@@ -60,7 +60,8 @@ TRAJECTORY_FIELDS = ("steps", "batch_size", "gradient_accumulation",
                      "context_length", "learning_rate", "min_lr_ratio",
                      "weight_decay", "betas", "grad_clip", "warmup_steps",
                      "precision", "seed", "eval_batches", "sampler",
-                     "pilot_stop_checks", "pilot_calibrated_seconds")
+                     "pilot_stop_checks", "pilot_calibrated_seconds", "deterministic_cuda",
+                     "verify_checkpoint_writes")
 
 
 class NonFiniteTrainingError(RuntimeError):
@@ -82,7 +83,11 @@ class Trainer:
         self.config = config
         self.stop_file = pathlib.Path(stop_file) if stop_file is not None else None
         t = config.training
+        if t.deterministic_cuda:
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         self.device = device if device is not None else detect_device()
+        if t.deterministic_cuda and self.device.type == "cuda":
+            torch.use_deterministic_algorithms(True)
         self.experiment_dir = pathlib.Path(experiment_dir) if experiment_dir else None
         # opt-in: a resume may only lengthen training.steps (recorded as a
         # protocol deviation); every other trajectory change is refused

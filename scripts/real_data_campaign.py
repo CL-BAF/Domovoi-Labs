@@ -61,6 +61,7 @@ def run(args):
         training={"steps": args.steps, "seed": args.seed, "gradient_accumulation": 2,
                   "sampler": "disjoint_segments", "pilot_stop_checks": True,
                   "synchronize_cuda_timing": True,
+                  "deterministic_cuda": True, "verify_checkpoint_writes": True,
                   "warmup_steps": min(200, max(1, args.steps // 20)),
                   "checkpoint_interval": 50 if args.steps <= 200 else 500,
                   "eval_interval": 50 if args.steps <= 200 else 250, "eval_batches": 25,
