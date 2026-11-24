@@ -103,7 +103,8 @@ def test_resume_without_existing_dir_creates_nothing(smoke_dataset):
 
 
 def _train_script(cfg_path, exp):
-    return subprocess.run([sys.executable, str(ROOT / "scripts" / "train.py"), "--config",
+    workload = "import sys; from scripts.train import _run; raise SystemExit(_run(sys.argv[1:]))"
+    return subprocess.run([sys.executable, "-c", workload, "--config",
                            str(cfg_path), "--resume", "--experiment-dir", str(exp)],
                           cwd=ROOT, capture_output=True, text=True, timeout=300)
 

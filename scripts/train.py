@@ -1,14 +1,14 @@
 """Train an experiment end to end.
 
 Usage:
-    python scripts/train.py --config configs/baseline_small.yaml
-    python scripts/train.py --config configs/baseline_small.yaml \
+    python scripts/train.py --research-id DRP-NNNN --config configs/baseline_small.yaml
+    python scripts/train.py --research-id DRP-NNNN --config configs/baseline_small.yaml \
         --resume --experiment-dir experiments/DML-0001
 
 --resume always requires --experiment-dir: without it a fresh experiment
 would be allocated and training would silently restart from step 0.
 
-Exit code: 0 only when the run COMPLETED.  An interrupted run exits 1 so
+Exit code: 0 only when the run COMPLETED.  An interrupted run exits 130 so
 automation never mistakes a partial model for a finished one.
 
 Flow: allocate experiment ID → write metadata (status RUNNING, git commit,
@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from domovoi.experiments.launch import run_research
 from domovoi.config import load_config
 from domovoi.datasets import DomovoiTokenizer
 from domovoi.experiments import create_experiment, set_status, update_metadata
@@ -35,6 +36,10 @@ from domovoi.utils import collect_env_info
 
 
 def main() -> int:
+    return run_research("train.py", _run)
+
+
+def _run(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True, help="experiment config yaml")
     ap.add_argument("--resume", action="store_true",
@@ -48,7 +53,7 @@ def main() -> int:
     ap.add_argument("--pilot-deadline", type=float, help=argparse.SUPPRESS)
     ap.add_argument("--stop-file", type=Path,
                     help="stop at a clean step boundary when this file exists")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
     if cfg.training.deterministic_cuda:
@@ -152,9 +157,9 @@ def main() -> int:
             # the status write above happened under this run's writer lock
             if trainer is not None:
                 trainer.close()
-    # an INTERRUPTED run is a partial model: exit 1 so pipelines/CI never
+    # an INTERRUPTED run is a partial model: exit 130 so pipelines/CI never
     # treat it as a finished training step
-    return 0 if status == "COMPLETED" else 1
+    return {"COMPLETED": 0, "INTERRUPTED": 130}.get(status, 1)
 
 
 if __name__ == "__main__":

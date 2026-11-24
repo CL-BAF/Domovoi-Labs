@@ -1,9 +1,9 @@
 """Run evaluation tasks on a trained experiment checkpoint.
 
 Usage:
-    python scripts/evaluate.py --experiment DML-0001
-    python scripts/evaluate.py --experiment DML-0001 --tasks hellaswag,piqa
-    python scripts/evaluate.py --experiment DML-0001 --limit 200
+    python scripts/evaluate.py --research-id DRP-NNNN --experiment DML-0001
+    python scripts/evaluate.py --research-id DRP-NNNN --experiment DML-0001 --tasks hellaswag,piqa
+    python scripts/evaluate.py --research-id DRP-NNNN --experiment DML-0001 --limit 200
 
 Writes machine-readable results to experiments/<ID>/evals.json.
 """
@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from domovoi.experiments.launch import run_research
 from domovoi.datasets import DomovoiTokenizer, verify_vocab
 from domovoi.evals import DEFAULT_TASKS, run_evals
 from domovoi.experiments import load_metadata, update_metadata
@@ -27,6 +28,10 @@ from domovoi.training.checkpoint import build_model_from_checkpoint, scan_checkp
 
 
 def main() -> int:
+    return run_research("evaluate.py", _run)
+
+
+def _run(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--experiment", required=True,
                     help="experiment ID (DML-0001) or experiment dir")
@@ -40,7 +45,7 @@ def main() -> int:
                          "training-time validation)")
     ap.add_argument("--checkpoint-step", type=int,
                     help="evaluate this saved step instead of the latest checkpoint")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     meta = load_metadata(args.experiment)
     exp_dir = Path(args.experiment) if Path(args.experiment).is_dir() \

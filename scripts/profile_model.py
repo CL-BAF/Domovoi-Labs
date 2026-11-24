@@ -2,9 +2,9 @@
 real CUDA VRAM peaks, prefill/decode speed, TTFT, context-length VRAM sweep.
 
 Usage:
-    python scripts/profile_model.py --experiment DML-0001
-    python scripts/profile_model.py --experiment DML-0001 --context-sweep 128 256 512
-    python scripts/profile_model.py --experiment DML-0001 --no-sweep
+    python scripts/profile_model.py --research-id DRP-NNNN --experiment DML-0001
+    python scripts/profile_model.py --research-id DRP-NNNN --experiment DML-0001 --context-sweep 128 256 512
+    python scripts/profile_model.py --research-id DRP-NNNN --experiment DML-0001 --no-sweep
 
 Writes machine-readable results to experiments/<ID>/profile.json.
 """
@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from domovoi.experiments.launch import run_research
 from domovoi.datasets import DomovoiTokenizer, verify_vocab
 from domovoi.experiments import load_metadata, update_metadata
 from domovoi.profiling import profile_model
@@ -27,6 +28,10 @@ from domovoi.utils import detect_device
 
 
 def main() -> int:
+    return run_research("profile_model.py", _run)
+
+
+def _run(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--experiment", required=True)
     ap.add_argument("--max-new-tokens", type=int, default=64)
@@ -34,7 +39,7 @@ def main() -> int:
                     help="context lengths for the VRAM-vs-context sweep; "
                          "defaults to a ladder up to the model context")
     ap.add_argument("--no-sweep", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     meta = load_metadata(args.experiment)
     exp_dir = Path(args.experiment) if Path(args.experiment).is_dir() \

@@ -5,6 +5,10 @@ Status: **PLAN ONLY. Nothing here has been run.** Every step marked
 GPU training, any dataset download, new experiment IDs and status changes.
 Written 2026-11-23, after the post-audit fixes (POST_AUDIT_FIXES.txt).
 
+Any new execution must also follow the [experiment protocol](EXPERIMENT_PROTOCOL.md).
+The command examples below record planned workload arguments. Add the approved
+`--research-id DRP-NNNN` selector when launching them from a gated revision.
+
 This plan **supersedes the thresholds in
 `docs/RECURRENT_ARCHITECTURE_RESEARCH.md` sections 8-9 for the pilot.**
 Those sections describe the full matrix and the 8K frontier question,

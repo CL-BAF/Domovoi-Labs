@@ -254,7 +254,8 @@ def test_resume_with_same_model_config_still_works(smoke_dataset):
 
 
 def _run_train_script(*args):
-    return subprocess.run([sys.executable, str(ROOT / "scripts" / "train.py"), *args],
+    workload = "import sys; from scripts.train import _run; raise SystemExit(_run(sys.argv[1:]))"
+    return subprocess.run([sys.executable, "-c", workload, *args],
                           cwd=ROOT, capture_output=True, text=True, timeout=300)
 
 

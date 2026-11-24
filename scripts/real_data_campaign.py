@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from domovoi.config import clone_config, load_config
 from domovoi.datasets import load_processed_meta
+from domovoi.experiments.launch import run_research, start_training_child
 from domovoi.utils.env import collect_env_info
 from scripts.plan_recurrent_experiments import PILOT_ARMS, build_arms
 
@@ -32,7 +33,7 @@ def sample_gpu():
     return dict(zip(SAMPLE_FIELDS, (x.strip() for x in out.strip().split(","))))
 
 
-def run(args):
+def _campaign(args):
     meta = load_processed_meta(args.data)
     env = collect_env_info(REPO)
     if env["git_commit"] == "unknown" or env["git_dirty"]:
@@ -82,13 +83,13 @@ def run(args):
             cfg.training.pilot_calibrated_seconds = args.calibrated_seconds[name]
         path = args.root / f"{run_id}-{name}.yaml"
         path.write_text(yaml.safe_dump(cfg.to_dict(), sort_keys=False), encoding="utf-8")
-        command = [sys.executable, "-u", str(REPO / "scripts/train.py"), "--config", str(path),
-                   "--stop-file", str(stop), "--pilot-deadline", str(deadline)]
+        child_args = ["--config", str(path), "--stop-file", str(stop),
+                      "--pilot-deadline", str(deadline)]
         print(f"{run_id} {name}: {path}", flush=True)
         with (args.root / f"{run_id}.console.log").open("w", encoding="utf-8") as log, \
                 (args.root / f"{run_id}.gpu.jsonl").open("w", encoding="utf-8") as gpu:
-            child = subprocess.Popen(command, cwd=REPO, stdout=log, stderr=subprocess.STDOUT,
-                                     env={**os.environ, "PYTHONUTF8": "1"})
+            child = start_training_child(child_args, cwd=REPO, stdout=log, stderr=subprocess.STDOUT,
+                                         env={**os.environ, "PYTHONUTF8": "1"})
             try:
                 while child.poll() is None:
                     if not stop.exists():
@@ -109,16 +110,18 @@ def run(args):
             except KeyboardInterrupt:
                 stop.write_text("Operator interrupt", encoding="utf-8")
                 child.wait()
-        results.append({"arm": name, "id": run_id, "config": str(path), "command": command,
+        results.append({"arm": name, "id": run_id, "config": str(path), "trainer_argv": child_args,
                         "exit_code": child.returncode})
         (args.root / "campaign.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
         if child.returncode:
             print(f"Campaign stopped after {run_id} exited {child.returncode}.", flush=True)
-            break
-    return 0 if len(results) == len(PILOT_ARMS) and all(not r["exit_code"] for r in results) else 1
+            return 130 if child.returncode == 130 or stop.exists() else 1
+    if len(results) == len(PILOT_ARMS):
+        return 0
+    return 130 if stop.exists() else 1
 
 
-if __name__ == "__main__":
+def _run(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=lambda s: Path(s).resolve(), required=True)
     parser.add_argument("--root", type=lambda s: Path(s).resolve(), required=True)
@@ -128,4 +131,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--calibrated-seconds", type=json.loads,
                         help="arm to full-run duration mapping, measured during calibration")
-    sys.exit(run(parser.parse_args()))
+    return _campaign(parser.parse_args(argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_research("real_data_campaign.py", _run))

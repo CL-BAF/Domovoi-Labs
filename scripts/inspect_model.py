@@ -2,12 +2,12 @@
 
 Builds the model with RANDOM weights on CPU, prints exact parameter counts,
 closed-form estimates (clearly labelled), and optionally runs an offline
-cached-vs-uncached greedy decode smoke test.  Writes nothing to disk; needs
-no data, tokenizer, GPU or network.
+cached-vs-uncached greedy decode smoke test. The workload needs no data,
+tokenizer or GPU. Its research claim requires GitHub.
 
 Usage:
-    python scripts/inspect_model.py --config configs/baseline_small.yaml
-    python scripts/inspect_model.py --config configs/smoke_test.yaml \
+    python scripts/inspect_model.py --research-id DRP-NNNN --config configs/baseline_small.yaml
+    python scripts/inspect_model.py --research-id DRP-NNNN --config configs/smoke_test.yaml \
         --architecture domovoi_recurrent_v1 --n-layers 2 --depth 4 --smoke
 """
 
@@ -23,6 +23,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from domovoi.experiments.launch import run_research
 from domovoi.config import clone_config, load_config
 from domovoi.models import build_model
 from domovoi.profiling import architecture_accounting, count_parameters
@@ -54,6 +55,10 @@ def cache_smoke(model, n_prompt: int = 16, n_new: int = 16, seed: int = 0) -> di
 
 
 def main() -> int:
+    return run_research("inspect_model.py", _run)
+
+
+def _run(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True)
@@ -62,7 +67,7 @@ def main() -> int:
     ap.add_argument("--depth", type=int, default=None, help="recurrence_depth")
     ap.add_argument("--order", default=None, help="recurrence_order: cycle | sequence")
     ap.add_argument("--smoke", action="store_true", help="run the cached-vs-uncached check")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
     overrides = {k: v for k, v in {

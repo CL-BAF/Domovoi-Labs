@@ -11,6 +11,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from domovoi.config import clone_config, load_config
+from domovoi.experiments.launch import run_research
 from domovoi.experiments.metrics_log import read_metrics
 from domovoi.training import Trainer
 
@@ -22,7 +23,7 @@ def state_digest(trainer):
     return digest.hexdigest()
 
 
-def run(args):
+def _verify(args):
     args.out.mkdir(exist_ok=False)
     cfg = clone_config(load_config(args.config), training={
         "steps": 4, "warmup_steps": 1, "eval_interval": 2, "eval_batches": 2,
@@ -78,8 +79,13 @@ def run(args):
     print(report)
 
 
-if __name__ == "__main__":
+def _run(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    run(parser.parse_args())
+    _verify(parser.parse_args(argv))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_research("verify_real_resume.py", _run))

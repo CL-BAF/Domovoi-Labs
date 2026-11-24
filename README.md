@@ -13,6 +13,15 @@ run on. No Domovoi architecture has been invented yet, by design.
 Read the spec first: **RESEARCH.md** (goal + rules), **BASELINES.md**
 (comparison models), **EVALS.md** (evaluation layers).
 
+## Research publication gate
+
+Before using a research launcher, commit and push its experiment plan and
+approval to [Domovoi Research](https://github.com/CL-BAF/Domovoi-research).
+Publish the preceding experiment's results and interpretation before starting
+another. The launcher verifies both on GitHub. See the
+[experiment protocol](docs/EXPERIMENT_PROTOCOL.md) and [contribution guide](CONTRIBUTING.md).
+The `DRP-NNNN` values below stand for the approved ID for each command.
+
 ## Setup
 
 Requires Python 3.10+ (developed on 3.13).
@@ -57,7 +66,7 @@ provenance record.
 ### 2. Train
 
 ```
-python scripts/train.py --config configs/baseline_small.yaml
+python scripts/train.py --research-id DRP-NNNN --config configs/baseline_small.yaml
 ```
 
 Allocates an experiment ID (`DML-0001`, ...), records git commit +
@@ -69,16 +78,17 @@ INTERRUPTED.
 ### 3. Resume
 
 ```
-python scripts/train.py --config configs/baseline_small.yaml --resume
+python scripts/train.py --research-id DRP-NNNN --config configs/baseline_small.yaml --resume --experiment-dir experiments/DML-0001
 ```
 
-Resume is **bit-exact**: model, optimizer, scheduler, step count, RNG
-states and the data-batch generator are all restored (verified by test).
+Resume restores model, optimizer, scheduler, step count, RNG states and the
+data-batch generator. Exact CUDA trajectory replay was verified with the
+pinned deterministic stack. See the [CUDA recovery record](https://github.com/CL-BAF/Domovoi-research/blob/research/real-data-calibration/findings/CUDA-RESUME-INCIDENT.md).
 
 ### 4. Generate
 
 ```
-python scripts/generate.py \
+python scripts/generate.py --research-id DRP-NNNN \
     --checkpoint experiments/DML-0001/checkpoints/step_00003000 \
     --prompt "Once upon a time" --max-new-tokens 200 \
     --temperature 0.8 --top-p 0.95
@@ -91,7 +101,7 @@ peak CUDA VRAM.
 
 ```
 python scripts/download_eval_data.py --tasks all --limit 500   # once; needs `datasets`
-python scripts/evaluate.py --experiment DML-0001 --limit 500
+python scripts/evaluate.py --research-id DRP-NNNN --experiment DML-0001 --limit 500
 ```
 
 Fast research evals (EVALS.md §1): validation perplexity, HellaSwag,
@@ -102,7 +112,7 @@ separate from training data.
 ### 6. Profile
 
 ```
-python scripts/profile_model.py --experiment DML-0001
+python scripts/profile_model.py --research-id DRP-NNNN --experiment DML-0001
 ```
 
 Parameter counts, checkpoint size, real CUDA peak VRAM (allocated +

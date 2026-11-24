@@ -128,6 +128,8 @@ def test_full_split_cli_keeps_checkpoint_results_and_rejects_interim_test(
         smoke_dataset, monkeypatch):
     train_cli = importlib.import_module("scripts.train")
     eval_cli = importlib.import_module("scripts.evaluate")
+    for command in (train_cli, eval_cli):
+        monkeypatch.setattr(command, "run_research", lambda script, run: run(sys.argv[1:]))
     raw = copy.deepcopy(smoke_dataset["config_dict"])
     directory = smoke_dataset["tmp_path"]
     raw["output"]["experiments_dir"] = str(directory / "experiments")
@@ -214,13 +216,14 @@ def test_campaign_launcher_shares_deadline_and_stops_on_failure(tmp_path, tiny_m
 
     def run(args):
         calls.append(args)
-        return SimpleNamespace(returncode=0 if len(calls) == 1 else 1)
+        return SimpleNamespace(wait=lambda: 0 if len(calls) == 1 else 1)
 
     monkeypatch.setattr(sys, "argv", ["run_pilot.py", *map(str, paths)])
     monkeypatch.setattr(runner.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(runner.subprocess, "run", run)
+    monkeypatch.setattr(runner, "run_research", lambda script, workload: workload(sys.argv[1:]))
+    monkeypatch.setattr(runner, "start_training_child", run)
     assert runner.main() == 1
-    assert [call[3] for call in calls] == list(map(str, paths[:2]))
+    assert [call[1] for call in calls] == list(map(str, paths[:2]))
     assert calls[0][-1] == calls[1][-1]
 
 

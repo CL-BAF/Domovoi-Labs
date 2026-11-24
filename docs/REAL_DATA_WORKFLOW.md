@@ -44,11 +44,14 @@ complete, published packed directory is refused on subsequent runs.
 
 ## Calibration and bounded campaign
 
-Run from a clean implementation commit with Git on the process PATH.
+Run from the exact clean implementation commit with Git on the process PATH.
+Publish each approved plan and the previous result under the
+[experiment protocol](EXPERIMENT_PROTOCOL.md). Replace each `DRP-NNNN` with
+the ID approved for the specific command.
 
 ```powershell
-python scripts/real_data_campaign.py --data <packed-version> --root <new-campaign> --steps 200 --seconds 900 --first-id 2
-python scripts/verify_real_resume.py --config <campaign-R02x4.yaml> --out <new-verification-directory>
+python scripts/real_data_campaign.py --research-id DRP-NNNN --data <packed-version> --root <new-campaign> --steps 200 --seconds 900 --first-id 2
+python scripts/verify_real_resume.py --research-id DRP-NNNN --config <campaign-R02x4.yaml> --out <new-verification-directory>
 ```
 
 Each campaign uses a single CUDA device and a shared deadline, records the
@@ -60,8 +63,9 @@ boundaries and closes the active run. The controller leaves the other arms
 pending when a run fails or is stopped.
 
 Read `DML-xxxx.console.log`, `DML-xxxx.gpu.jsonl`, and the matching
-experiment's checkpoints, metrics and summary. Continue a particular
-interrupted arm by using its original YAML and `scripts/train.py --resume
+experiment's checkpoints, metrics and summary. Close and publish the original
+interruption before planning further compute. An approved continuation uses the
+original YAML with `scripts/train.py --research-id DRP-NNNN --resume
 --experiment-dir <run-dir>`. Use a new stop-file path and a freshly bounded
 monotonic deadline if running under a new supervisor. Calibration figures
 describe training. They do not qualify an inference workload.

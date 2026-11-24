@@ -1,7 +1,7 @@
 """Generate text from a checkpoint (independent of training).
 
 Usage:
-    python scripts/generate.py --checkpoint experiments/DML-0001/checkpoints/step_00003000 \
+    python scripts/generate.py --research-id DRP-NNNN --checkpoint experiments/DML-0001/checkpoints/step_00003000 \
         --prompt "Once upon a time" --max-new-tokens 200 --temperature 0.8 --top-p 0.95
 
 Prints the generated text plus measured generation speed and peak VRAM.
@@ -16,11 +16,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from domovoi.experiments.launch import run_research
 from domovoi.datasets import DomovoiTokenizer, verify_vocab
 from domovoi.inference import generate, load_model_for_inference
 
 
 def main() -> int:
+    return run_research("generate.py", _run)
+
+
+def _run(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--checkpoint", required=True, help="checkpoint directory")
     ap.add_argument("--prompt", required=True)
@@ -32,7 +37,7 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--save-to", default=None,
                     help="optional path to write the machine-readable result json")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     model, cfg, meta, device = load_model_for_inference(args.checkpoint)
     tokenizer = DomovoiTokenizer(cfg.tokenizer.path) if cfg.tokenizer.path else None
