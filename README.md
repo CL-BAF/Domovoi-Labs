@@ -20,7 +20,14 @@ approval to [Domovoi Research](https://github.com/CL-BAF/Domovoi-research).
 Publish the preceding experiment's results and interpretation before starting
 another. The launcher verifies both on GitHub. See the
 [experiment protocol](docs/EXPERIMENT_PROTOCOL.md) and [contribution guide](CONTRIBUTING.md).
-The `DRP-NNNN` values below stand for the approved ID for each command.
+Run approved commands through the isolated bootstrap. The exact script and
+arguments come from the approved plan. Keep source, dependencies and data
+in separate directories. For CPU correctness work on the new reference
+instruments, see [CPU reference instruments](docs/CPU_INSTRUMENTS.md).
+
+```text
+python -I -S -B scripts/experiment_protocol.py run DRP-NNNN --workspace <workspace> --dependencies <dependency-tree>
+```
 
 ## Setup
 
@@ -65,21 +72,17 @@ provenance record.
 
 ### 2. Train
 
-```
-python scripts/train.py --research-id DRP-NNNN --config configs/baseline_small.yaml
-```
+Use the guarded command with a plan for `scripts/train.py` and the pinned config.
 
 Allocates an experiment ID (`DML-0001`, ...), records git commit +
 environment, trains (~41M-parameter baseline Transformer) with bf16 AMP,
 writes `metrics.jsonl` / `val_metrics.jsonl`, periodic + final checkpoints,
-and `summary.json`. Ctrl+C saves a rescue checkpoint and marks the run
-INTERRUPTED.
+and `summary.json`. Ctrl+C marks the run INTERRUPTED. Checkpoint recovery
+uses the last complete state when an optimizer update was interrupted.
 
 ### 3. Resume
 
-```
-python scripts/train.py --research-id DRP-NNNN --config configs/baseline_small.yaml --resume --experiment-dir experiments/DML-0001
-```
+Use a reviewed resume plan to stage a copy of the pinned run into a declared writable directory.
 
 Resume restores model, optimizer, scheduler, step count, RNG states and the
 data-batch generator. Exact CUDA trajectory replay was verified with the
@@ -87,22 +90,14 @@ pinned deterministic stack. See the [CUDA recovery record](https://github.com/CL
 
 ### 4. Generate
 
-```
-python scripts/generate.py --research-id DRP-NNNN \
-    --checkpoint experiments/DML-0001/checkpoints/step_00003000 \
-    --prompt "Once upon a time" --max-new-tokens 200 \
-    --temperature 0.8 --top-p 0.95
-```
+Use a plan for `scripts/generate.py` that pins the checkpoint, prompt and decoding arguments.
 
 Independent of training; prints text plus measured TTFT, decode tok/s and
 peak CUDA VRAM.
 
 ### 5. Evaluate
 
-```
-python scripts/download_eval_data.py --tasks all --limit 500   # once; needs `datasets`
-python scripts/evaluate.py --research-id DRP-NNNN --experiment DML-0001 --limit 500
-```
+Use a plan for `scripts/evaluate.py` with provisioned and hashed evaluation assets, and give `--out` a declared file.
 
 Fast research evals (EVALS.md §1): validation perplexity, HellaSwag,
 ARC-Challenge, PIQA, WinoGrande, GSM8K subset, IF mini-suite. Results are
@@ -111,9 +106,7 @@ separate from training data.
 
 ### 6. Profile
 
-```
-python scripts/profile_model.py --research-id DRP-NNNN --experiment DML-0001
-```
+Use a plan for `scripts/profile_model.py` with a pinned checkpoint, runtime lock and declared `--out` file.
 
 Parameter counts, checkpoint size, real CUDA peak VRAM (allocated +
 reserved), prefill/decode speed, TTFT, and the VRAM-vs-context sweep. On

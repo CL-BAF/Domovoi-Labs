@@ -1,5 +1,8 @@
 """Run calibrated pilot arms serially under one aggregate time budget."""
 
+if __name__ == "__main__":
+    raise SystemExit("Use python -I -S -B scripts/experiment_protocol.py run for research.")
+
 import argparse
 import sys
 import time
@@ -51,7 +54,3 @@ def _run(argv: list[str]) -> int:
                   file=sys.stderr)
             return 130 if code == 130 else 1
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

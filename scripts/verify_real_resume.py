@@ -1,5 +1,8 @@
 """Exercise clean-boundary checkpoint recovery on the packed TinyStories data."""
 
+if __name__ == "__main__":
+    raise SystemExit("Use python -I -S -B scripts/experiment_protocol.py run for research.")
+
 import argparse
 import hashlib
 import json
@@ -11,7 +14,6 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from domovoi.config import clone_config, load_config
-from domovoi.experiments.launch import run_research
 from domovoi.experiments.metrics_log import read_metrics
 from domovoi.training import Trainer
 
@@ -85,7 +87,3 @@ def _run(argv: list[str]) -> int:
     parser.add_argument("--out", type=Path, required=True)
     _verify(parser.parse_args(argv))
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(run_research("verify_real_resume.py", _run))

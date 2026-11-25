@@ -9,6 +9,9 @@ Prints the generated text plus measured generation speed and peak VRAM.
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    raise SystemExit("Use python -I -S -B scripts/experiment_protocol.py run for research.")
+
 import argparse
 import json
 import sys
@@ -73,7 +76,3 @@ def _run(argv: list[str]) -> int:
         Path(args.save_to).write_text(json.dumps(result, indent=2), encoding="utf-8")
         print(f"[generate] result saved to {args.save_to}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -44,6 +45,8 @@ RESULT_FIELDS = (
     "possible_explanations", "supporting_evidence", "competing_hypotheses", "uncertainty",
     "unexpected_results_and_failures", "lessons", "recommended_next_experiment",
 )
+ANALYSIS_ROLES = {"evaluation", "scoring", "statistics", "primary_metric",
+                  "dataset_generation", "data_transforms"}
 
 
 class ProtocolError(RuntimeError):
@@ -64,9 +67,12 @@ def matches(pattern: re.Pattern, value) -> bool:
 
 
 def repo_path(value) -> bool:
-    return (isinstance(value, str) and bool(value) and
-            not any(c in value for c in "\\:\r\n\x00") and
-            all(part not in ("", ".", "..") for part in value.split("/")))
+    if not isinstance(value, str) or any(ord(c) < 32 or c in '\\:<>"|?*' for c in value):
+        return False
+    return all(part and not part.endswith((".", " ")) and
+               part.split(".", 1)[0].upper() not in {"CON", "PRN", "AUX", "NUL"} and
+               not re.fullmatch(r"(?:COM|LPT)[1-9¹²³]", part.split(".", 1)[0], re.IGNORECASE)
+               for part in value.split("/"))
 
 
 def git(repo: Path, *args, input_bytes: bytes | None = None) -> bytes:
@@ -105,6 +111,53 @@ def plan_path(experiment_id: str) -> str:
 
 def result_path(experiment_id: str) -> str:
     return f"experiments/protocol/results/{experiment_id}.json"
+
+
+def validate_execution(plan: dict) -> None:
+    execution = plan.get("execution")
+    require(isinstance(execution, dict) and set(execution) == {
+        "runtime_lock", "analysis", "output_dirs", "temporary_dirs", "assets", "completion_artifacts",
+    }, "Plan needs a complete locked execution manifest.")
+    pins = plan["inputs"]
+    analysis = execution["analysis"]
+    require(isinstance(analysis, dict) and set(analysis) == ANALYSIS_ROLES and
+            all(repo_path(p) and p in pins for p in analysis.values()) and
+            repo_path(execution["runtime_lock"]) and execution["runtime_lock"] in pins,
+            "Pin each analysis, metric and data role and the runtime lock by SHA-256.")
+    require(repo_path(plan["command"]["script"]) and plan["command"]["script"] in pins,
+            "The command script must be a pinned source file.")
+    for name in ("output_dirs", "temporary_dirs", "completion_artifacts"):
+        values = execution[name]
+        require(isinstance(values, list) and bool(values) and all(repo_path(p) for p in values)
+                and len(set(values)) == len(values), f"Declare unique relative paths for {name}.")
+    directories = execution["output_dirs"] + execution["temporary_dirs"]
+    for i, first in enumerate(directories):
+        require(all(not (first == second or first.startswith(second + "/")
+                         or second.startswith(first + "/"))
+                    for second in directories[i + 1:]), "Writable directories may not overlap.")
+    artifacts = execution["completion_artifacts"]
+    require(all(any(path.startswith(folder + "/") for folder in execution["output_dirs"])
+                for path in artifacts), "Completion evidence must be inside a declared output directory.")
+    assets = execution["assets"]
+    require(isinstance(assets, dict) and all(repo_path(p) and matches(DIGEST, digest)
+                                             for p, digest in assets.items()),
+            "Declare external workspace assets with SHA-256 digests.")
+
+
+def valid_completion(entry: dict) -> bool:
+    proof = entry.get("completion_token")
+    commitment = entry.get("completion_sha256")
+    evidence = entry.get("execution_evidence")
+    return (matches(DIGEST, proof) and matches(DIGEST, commitment) and
+            hashlib.sha256(proof.encode()).hexdigest() == commitment and
+            type(entry.get("exit_code")) is int and entry["exit_code"] == 0 and
+            isinstance(evidence, dict) and bool(evidence) and
+            all(repo_path(p) and matches(DIGEST, value) for p, value in evidence.items()))
+
+
+def analysis_receipt(plan: dict) -> dict:
+    return {role: {"path": path, "sha256": plan["inputs"][path]}
+            for role, path in plan["execution"]["analysis"].items()}
 
 
 def slot(state: dict, experiment_id: str) -> dict:
@@ -201,13 +254,24 @@ class Ledger:
                 if new["state"] == "RUNNING":
                     require(new.get("plan_commit") == old.get("plan_commit") and
                             matches(DIGEST, new.get("claim_sha256")) and
+                            matches(DIGEST, new.get("completion_sha256")) and
                             matches(SHA, new.get("implementation_commit")),
                             "RUNNING needs the approved plan and a valid claim identity.")
                 if old["state"] in {"RUNNING", *TERMINAL, "ANALYSED"}:
                     require(all(new.get(key) == old.get(key) for key in
                                 ("plan_commit", "claim_sha256", "implementation_commit",
-                                 "started_at", "script", "worker_sha256")),
+                                 "started_at", "script", "worker_sha256", "completion_sha256")),
                             "The ledger changed the identity of a claimed experiment.")
+                if old["state"] == "RUNNING" and new["state"] == "COMPLETED":
+                    require(valid_completion(new), "COMPLETED requires the original execution proof.")
+                    plan = self.documented_plan(new["plan_commit"], new["id"])
+                    require(set(new["execution_evidence"]) == set(plan["execution"]["completion_artifacts"]),
+                            "COMPLETED must record exactly the preregistered execution evidence.")
+                if old["state"] in TERMINAL | {"ANALYSED"}:
+                    keys = ("completion_token", "exit_code", "execution_evidence",
+                            "finished_at", "execution_note", "terminal_recorded_at")
+                    require(all(new.get(key) == old.get(key) for key in keys),
+                            "The ledger changed terminal execution evidence.")
             previous = rows
 
     def approved_plan(self, head: str, state: dict, experiment_id: str) -> dict:
@@ -227,7 +291,12 @@ class Ledger:
         require(saved == self.blob(head, path) and
                 self.linked(pinned, experiment_id) == self.linked(head, experiment_id),
                 "The approved plan changed. Document and approve the new version before launch.")
-        data = read_json(saved, path)
+        return self.documented_plan(pinned, experiment_id)
+
+    def documented_plan(self, commit: str, experiment_id: str) -> dict:
+        require(matches(SHA, commit), "An exact plan commit is required.")
+        path = plan_path(experiment_id)
+        data = read_json(self.blob(commit, path), path)
         require(data.get("id") == experiment_id and matches(SHA, data.get("implementation_commit")),
                 "The plan needs the approved ID and a full implementation commit SHA.")
         require_fields(data, PLAN_FIELDS, "Plan")
@@ -240,6 +309,7 @@ class Ledger:
         require(isinstance(inputs, dict) and all(repo_path(k) and matches(DIGEST, v)
                                                  for k, v in inputs.items()),
                 "Plan inputs must map checkout-relative files to SHA-256 digests.")
+        validate_execution(data)
         return data
 
     def verify_publication(self, head: str, entry: dict) -> None:
@@ -263,6 +333,10 @@ class Ledger:
         result = read_json(raw, path)
         require(result.get("id") == experiment_id and result.get("outcome") == finished["state"],
                 f"{experiment_id} result does not match the terminal outcome.")
+        plan = self.documented_plan(start, experiment_id)
+        require(result.get("analysis_sources") == analysis_receipt(plan) and
+                result.get("analysis_implementation_commit") == plan["implementation_commit"],
+                "Published analysis and primary metrics must use the original approved source pins.")
         require_fields(result, RESULT_FIELDS, "Result")
         evidence = result.get("evidence")
         require(isinstance(evidence, list) and bool(evidence) and all(repo_path(p) for p in evidence),

@@ -8,6 +8,7 @@ produced it.
 from __future__ import annotations
 
 import importlib.metadata
+import os
 import platform
 import subprocess
 from pathlib import Path
@@ -75,8 +76,9 @@ def collect_env_info(repo_dir: str | Path = ".") -> dict:
         })
     info["packages"] = {p: v for p in TRACKED_PACKAGES
                         if (v := _package_version(p)) is not None}
-    info["git_commit"] = get_git_commit(repo_dir)
-    info["git_dirty"] = get_git_dirty(repo_dir)
+    locked_source = os.environ.get("DOMOVOI_SOURCE_COMMIT")
+    info["git_commit"] = locked_source or get_git_commit(repo_dir)
+    info["git_dirty"] = False if locked_source else get_git_dirty(repo_dir)
     return info
 
 
