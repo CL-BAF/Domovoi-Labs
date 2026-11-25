@@ -46,12 +46,13 @@ complete, published packed directory is refused on subsequent runs.
 
 Run from the exact clean implementation commit with Git on the process PATH.
 Publish each approved plan and the previous result under the
-[experiment protocol](EXPERIMENT_PROTOCOL.md). Replace each `DRP-NNNN` with
-the ID approved for the specific command.
+[experiment protocol](EXPERIMENT_PROTOCOL.md). Pin `scripts/real_data_campaign.py`
+or `scripts/verify_real_resume.py` and the exact arguments in the plan. Declare
+packed data and any imported checkpoints as read-only workspace assets, and
+declare the writable campaign or verification directories.
 
 ```powershell
-python scripts/real_data_campaign.py --research-id DRP-NNNN --data <packed-version> --root <new-campaign> --steps 200 --seconds 900 --first-id 2
-python scripts/verify_real_resume.py --research-id DRP-NNNN --config <campaign-R02x4.yaml> --out <new-verification-directory>
+python -I -S -B scripts/experiment_protocol.py run DRP-NNNN --workspace <workspace> --dependencies <dependency-tree>
 ```
 
 Each campaign uses a single CUDA device and a shared deadline, records the
@@ -65,7 +66,7 @@ pending when a run fails or is stopped.
 Read `DML-xxxx.console.log`, `DML-xxxx.gpu.jsonl`, and the matching
 experiment's checkpoints, metrics and summary. Close and publish the original
 interruption before planning further compute. An approved continuation uses the
-original YAML with `scripts/train.py --research-id DRP-NNNN --resume
---experiment-dir <run-dir>`. Use a new stop-file path and a freshly bounded
+original YAML and pins `scripts/train.py` with `--resume --experiment-dir <run-dir>`.
+Use a new stop-file path and a freshly bounded
 monotonic deadline if running under a new supervisor. Calibration figures
 describe training. They do not qualify an inference workload.

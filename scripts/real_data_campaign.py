@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    raise SystemExit("Use python -I -S -B scripts/experiment_protocol.py run for research.")
+
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -18,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from domovoi.config import clone_config, load_config
 from domovoi.datasets import load_processed_meta
-from domovoi.experiments.launch import run_research, start_training_child
+from domovoi.experiments.launch import start_training_child
+from domovoi.experiments.runtime import active_runtime
 from domovoi.utils.env import collect_env_info
 from scripts.plan_recurrent_experiments import PILOT_ARMS, build_arms
 
@@ -27,7 +30,10 @@ SAMPLE_FIELDS = ("timestamp", "temperature.gpu", "utilization.gpu", "memory.used
 
 
 def sample_gpu():
-    out = subprocess.check_output(["nvidia-smi", "-i", "0",
+    runtime = active_runtime()
+    if "nvidia-smi" not in runtime.tools or not runtime.gpu_device:
+        raise RuntimeError("The campaign requires locked GPU telemetry.")
+    out = subprocess.check_output([str(runtime.tools["nvidia-smi"]), "-i", runtime.gpu_device,
                                    "--query-gpu=" + ",".join(SAMPLE_FIELDS),
                                    "--format=csv,noheader,nounits"], text=True, timeout=10)
     return dict(zip(SAMPLE_FIELDS, (x.strip() for x in out.strip().split(","))))
@@ -50,8 +56,8 @@ def _campaign(args):
     args.root.mkdir(exist_ok=False)
     (args.root / "environment.json").write_text(json.dumps(env, indent=2), encoding="utf-8")
     (args.root / "data-manifest.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    (args.root / "pip-freeze.txt").write_text(subprocess.check_output(
-        [sys.executable, "-m", "pip", "freeze"], text=True), encoding="utf-8")
+    (args.root / "runtime-lock.json").write_text(
+        json.dumps(active_runtime().lock, indent=2), encoding="utf-8")
     base = clone_config(
         load_config(REPO / "configs/baseline_small.yaml"),
         model={"vocab_size": meta["tokens"]["vocab_size"]},
@@ -88,8 +94,7 @@ def _campaign(args):
         print(f"{run_id} {name}: {path}", flush=True)
         with (args.root / f"{run_id}.console.log").open("w", encoding="utf-8") as log, \
                 (args.root / f"{run_id}.gpu.jsonl").open("w", encoding="utf-8") as gpu:
-            child = start_training_child(child_args, cwd=REPO, stdout=log, stderr=subprocess.STDOUT,
-                                         env={**os.environ, "PYTHONUTF8": "1"})
+            child = start_training_child(child_args, stdout=log, stderr=subprocess.STDOUT)
             try:
                 while child.poll() is None:
                     if not stop.exists():
@@ -132,7 +137,3 @@ def _run(argv: list[str]) -> int:
     parser.add_argument("--calibrated-seconds", type=json.loads,
                         help="arm to full-run duration mapping, measured during calibration")
     return _campaign(parser.parse_args(argv))
-
-
-if __name__ == "__main__":
-    raise SystemExit(run_research("real_data_campaign.py", _run))

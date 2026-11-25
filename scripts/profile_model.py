@@ -11,6 +11,9 @@ Writes machine-readable results to experiments/<ID>/profile.json.
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    raise SystemExit("Use python -I -S -B scripts/experiment_protocol.py run for research.")
+
 import argparse
 import json
 import sys
@@ -23,7 +26,7 @@ from domovoi.datasets import DomovoiTokenizer, verify_vocab
 from domovoi.experiments import load_metadata, update_metadata
 from domovoi.profiling import profile_model
 from domovoi.training import CheckpointManager
-from domovoi.training.checkpoint import build_model_from_checkpoint
+from domovoi.training.checkpoint import build_model_from_checkpoint, scan_checkpoints
 from domovoi.utils import detect_device
 
 
@@ -39,12 +42,18 @@ def _run(argv: list[str]) -> int:
                     help="context lengths for the VRAM-vs-context sweep; "
                          "defaults to a ladder up to the model context")
     ap.add_argument("--no-sweep", action="store_true")
+    ap.add_argument("--out", type=Path, help="write profile separately from the read-only input run")
     args = ap.parse_args(argv)
 
     meta = load_metadata(args.experiment)
     exp_dir = Path(args.experiment) if Path(args.experiment).is_dir() \
         else Path("experiments") / meta["experiment_id"]
-    ckpt_dir = CheckpointManager(exp_dir / "checkpoints").latest()
+    root = exp_dir / "checkpoints"
+    if args.out is not None:
+        latest = scan_checkpoints(root)["latest"]
+        ckpt_dir = latest.read_from if latest is not None else None
+    else:
+        ckpt_dir = CheckpointManager(root).latest()
     if ckpt_dir is None:
         raise SystemExit(f"No checkpoint found under {exp_dir / 'checkpoints'}")
 
@@ -83,9 +92,13 @@ def _run(argv: list[str]) -> int:
     )
     profile["experiment_id"] = meta["experiment_id"]
     profile["tokenizer_sha256"] = tokenizer.sha256
-    out = exp_dir / "profile.json"
-    out.write_text(json.dumps(profile, indent=2), encoding="utf-8")
-    update_metadata(exp_dir, {"profile_file": str(out)})
+    if args.out is not None:
+        with args.out.open("x", encoding="utf-8") as f:
+            json.dump(profile, f, indent=2, allow_nan=False)
+    else:
+        out = exp_dir / "profile.json"
+        out.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+        update_metadata(exp_dir, {"profile_file": str(out)})
 
     inf = profile["inference"]
     print(f"[profile] params       : {profile['parameters']['total']:,}")
@@ -99,7 +112,3 @@ def _run(argv: list[str]) -> int:
               f"{inf['peak_vram_reserved_mb']} MiB reserved")
     print(f"[profile] written to {out}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

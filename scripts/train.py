@@ -18,6 +18,9 @@ write summary.json → set status COMPLETED (or FAILED / INTERRUPTED).
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    raise SystemExit("Use python -I -S -B scripts/experiment_protocol.py run for research.")
+
 import argparse
 import os
 import sys
@@ -160,7 +163,3 @@ def _run(argv: list[str]) -> int:
     # an INTERRUPTED run is a partial model: exit 130 so pipelines/CI never
     # treat it as a finished training step
     return {"COMPLETED": 0, "INTERRUPTED": 130}.get(status, 1)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

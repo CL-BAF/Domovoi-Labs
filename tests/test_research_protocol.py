@@ -1,66 +1,90 @@
-"""Exercise the launch boundary with synthetic callbacks and an isolated Git remote."""
+"""No live GitHub claims, model training or scientific workloads in these tests."""
 
 import hashlib
 import io
 import json
-import subprocess
-import sys
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from domovoi.experiments import launch, protocol
 from domovoi.experiments.protocol import Ledger, ProtocolError, git, slot
+from domovoi.experiments.runtime import runtime_identity
+from scripts.experiment_protocol import verify_checkout
 
 ID = "DRP-0001"
-ARGS = ["--config", "config.yaml"]
 GATED = ("train", "evaluate", "profile_model", "generate", "inspect_model",
          "verify_real_resume", "run_pilot", "real_data_campaign")
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = "research_workloads/writer.py"
+WRITE = "from pathlib import Path\ndef main(argv):\n    Path('out').mkdir(exist_ok=True)\n    Path('out/receipt.json').write_text('fixture output')\n    return 0\n"
 
 
-class RemoteFixture:
-    def __init__(self, tmp_path, monkeypatch):
-        self.remote = tmp_path / "remote"
-        self.editor = tmp_path / "editor"
-        self.local = tmp_path / "implementation"
-        for path in (self.remote, self.editor, self.local):
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+class Fixtures:
+    def __init__(self, tmp, monkeypatch):
+        self.remote, self.editor, self.source, self.workspace, self.deps = (
+            tmp / name for name in ("remote", "editor", "src", "work", "deps"))
+        for path in (self.remote, self.editor, self.source, self.workspace, self.deps):
             path.mkdir()
         git(self.remote, "init", "--bare", "--quiet")
-        git(self.editor, "init", "--quiet")
-        git(self.local, "init", "--quiet")
-        self.put("config.yaml", "test: fixture\n", self.local)
-        self.implementation = self.commit("fixture implementation", self.local)
-        self.plan = {field: "synthetic verification fixture" for field in protocol.PLAN_FIELDS}
+        for path in (self.editor, self.source):
+            git(path, "init", "--quiet")
+            git(path, "config", "core.autocrlf", "false")
+        self.put(self.source, ".gitignore", "cache/\n")
+        self.put(self.deps, "fixture_dependency.py", "value = 1\n")
+        self.put(self.source, "runtime.json",
+                 {**runtime_identity(self.deps), "gpu": None, "tools": {}, "environment": {}})
+        self.put(self.source, SCRIPT, WRITE)
+        for role in protocol.ANALYSIS_ROLES:
+            self.put(self.source, f"analysis/{role}.txt", f"frozen {role}")
+        self.source_sha = self.commit(self.source, "fixture code")
+        self.plan = {name: "frozen fixture" for name in protocol.PLAN_FIELDS}
         self.plan.update(
-            id=ID, implementation_commit=self.implementation,
-            command={"script": "scripts/train.py", "argv": ARGS},
-            inputs={"config.yaml": hashlib.sha256(b"test: fixture\n").hexdigest()},
+            id=ID, implementation_commit=self.source_sha, command={"script": SCRIPT, "argv": []},
+            execution={"runtime_lock": "runtime.json", "output_dirs": ["out"],
+                       "temporary_dirs": ["scratch"], "assets": {},
+                       "completion_artifacts": ["out/receipt.json"],
+                       "analysis": {role: f"analysis/{role}.txt" for role in protocol.ANALYSIS_ROLES}},
         )
-        monkeypatch.setattr(protocol, "RESEARCH_URL", str(self.remote))
-        monkeypatch.setattr(launch, "ROOT", self.local)
-        monkeypatch.chdir(self.local)
-        monkeypatch.setattr(launch, "published_implementation",
-                            lambda sha: sha == self.implementation)
+        self.pin_inputs()
         self.rows = []
         self.publish("bootstrap")
+        monkeypatch.setattr(protocol, "RESEARCH_URL", str(self.remote))
+        monkeypatch.setattr(launch, "ROOT", self.source)
+        monkeypatch.setattr(launch, "published_implementation", lambda sha: None)
 
-    def put(self, path, data, repo=None):
-        target = (repo or self.editor) / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes((data if isinstance(data, str) else json.dumps(data)).encode())
+    @staticmethod
+    def put(root, path, payload):
+        file = root / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_bytes((payload if isinstance(payload, str) else json.dumps(payload)).encode())
 
-    def commit(self, message, repo):
-        git(repo, "add", ".")
-        git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-            "commit", "--quiet", "-m", message)
-        return git(repo, "rev-parse", "HEAD").decode().strip()
+    @staticmethod
+    def commit(root, note):
+        git(root, "add", ".")
+        git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--quiet", "-m", note)
+        return git(root, "rev-parse", "HEAD").decode().strip()
+
+    def pin_inputs(self):
+        execution = self.plan["execution"]
+        paths = [execution["runtime_lock"], *execution["analysis"].values(),
+                 self.plan["command"]["script"]]
+        self.plan["inputs"] = {p: digest((self.source / p).read_bytes()) for p in paths}
 
     def publish(self, message):
-        self.put(protocol.STATE, {"schema": 1, "experiments": self.rows})
-        head = self.commit(message, self.editor)
+        self.put(self.editor, protocol.STATE, {"schema": 1, "experiments": self.rows})
+        commit = self.commit(self.editor, message)
         git(self.editor, "push", "--quiet", str(self.remote), f"HEAD:{protocol.LEDGER_REF}")
-        return head
+        return commit
 
     def sync(self):
         git(self.editor, "fetch", "--quiet", str(self.remote), protocol.LEDGER_REF)
@@ -68,220 +92,304 @@ class RemoteFixture:
         self.rows = json.loads((self.editor / protocol.STATE).read_bytes())["experiments"]
         return git(self.editor, "rev-parse", "HEAD").decode().strip()
 
-    def approve(self, experiment_id=ID):
-        self.rows.append({"id": experiment_id, "state": "PROPOSED"})
-        self.publish("propose " + experiment_id)
-        self.put(protocol.plan_path(experiment_id), {**self.plan, "id": experiment_id})
-        self.put(protocol.record_path(experiment_id), "# Plan\n")
+    def approve(self, id=ID):
+        self.rows.append({"id": id, "state": "PROPOSED"})
+        self.publish("proposed")
+        self.put(self.editor, protocol.plan_path(id), {**self.plan, "id": id})
+        self.put(self.editor, protocol.record_path(id), "# Fixture")
         for prefix, doc in (("", "README.md"), ("experiments/", protocol.INDEX)):
-            previous = self.editor / doc
-            text = previous.read_text(encoding="utf-8") if previous.exists() else ""
-            path = protocol.record_path(experiment_id).removeprefix(prefix)
-            self.put(doc, text + f"\n[{experiment_id}]({path})\n")
+            file = self.editor / doc
+            before = file.read_text(encoding="utf-8") if file.exists() else ""
+            self.put(self.editor, doc,
+                     before + f"\n[{id}]({protocol.record_path(id).removeprefix(prefix)})\n")
         self.rows[-1]["state"] = "DOCUMENTED"
-        documented = self.publish("document " + experiment_id)
+        documented = self.publish("documented")
         self.rows[-1].update(state="APPROVED", plan_commit=documented)
-        return self.publish("approve " + experiment_id)
+        self.publish("approved")
 
-    def analyse_and_publish(self):
+    def invoke(self, id=ID):
+        return launch.run_approved(id, self.source_sha, self.workspace, self.deps)
+
+    def manual_claim(self, token="a" * 64, script=Path(SCRIPT).name, key=None):
+        directory = launch.receipt_directory(ID)
+        directory.mkdir(parents=True)
+        receipt = launch.Receipt(ID, directory, token, script)
+        launch.write_local(directory / "claim.json", {"token": token, "script": script})
+        with Ledger() as ledger:
+            head, state = ledger.refresh()
+            slot(state, ID).update(state="RUNNING", claim_sha256=receipt.digest,
+                                   implementation_commit=self.source_sha, script=script,
+                                   completion_sha256=digest(b"fixture proof"),
+                                   worker_sha256=digest(key.encode()) if key else None)
+            ledger.advance(head, state, "fixture claim")
+        return receipt
+
+    def publish_result(self, *, changed_metric=False):
         terminal = self.sync()
-        row = self.rows[-1]
-        result = {field: "synthetic callback result" for field in protocol.RESULT_FIELDS}
-        self.put(protocol.result_path(ID), {**result, "id": ID, "outcome": row["state"],
-                                           "evidence": ["measurements.json"]})
-        self.put("measurements.json", {"fixture": True})
-        self.put(protocol.record_path(ID), "# Plan\n\n# Result\nCallback finished.")
-        self.put("README.md", (self.editor / "README.md").read_text() + "\nPublished summary.\n")
-        row.update(state="ANALYSED", outcome=row["state"], terminal_commit=terminal)
-        analysed = self.publish("analyse")
-        row.update(state="PUBLISHED", analysis_commit=analysed)
-        self.publish("publish")
+        evidence = "measurements.json"
+        result = {name: "fixture" for name in protocol.RESULT_FIELDS}
+        pins = protocol.analysis_receipt(self.plan)
+        if changed_metric:
+            pins["primary_metric"]["sha256"] = "0" * 64
+        self.put(self.editor, protocol.result_path(ID), {
+            **result, "id": ID, "outcome": self.rows[-1]["state"], "evidence": [evidence],
+            "analysis_sources": pins, "analysis_implementation_commit": self.source_sha,
+        })
+        self.put(self.editor, evidence, {"fixture": True})
+        self.put(self.editor, protocol.record_path(ID), "# Fixture\n\nEvidence")
+        file = self.editor / "README.md"
+        self.put(self.editor, "README.md", file.read_text(encoding="utf-8") + "\nPublished.\n")
+        self.rows[-1].update(state="ANALYSED", terminal_commit=terminal, outcome=self.rows[-1]["state"])
+        analysed = self.publish("analysed")
+        self.rows[-1].update(state="PUBLISHED", analysis_commit=analysed)
+        self.publish("published")
 
 
 @pytest.fixture
-def remote(tmp_path, monkeypatch):
-    return RemoteFixture(tmp_path, monkeypatch)
+def fixture(tmp_path, monkeypatch):
+    return Fixtures(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("name", GATED)
-def test_direct_cli_refuses_without_research_id(name, tmp_path):
-    root = Path(__file__).resolve().parents[1]
-    result = subprocess.run([sys.executable, str(root / "scripts" / f"{name}.py"),
-                             "--config", "missing"], cwd=tmp_path, capture_output=True)
-    assert result.returncode == 1
-    assert b"Start with --research-id" in result.stderr
+def test_direct_cli_refuses_before_importing_workload(name, tmp_path):
+    result = subprocess.run([sys.executable, "-I", "-S", "-B",
+                             str(ROOT / "scripts" / f"{name}.py"), "--research-id", ID],
+                            cwd=tmp_path, capture_output=True)
+    assert result.returncode and b"experiment_protocol.py run" in result.stderr
     assert not list(tmp_path.iterdir())
 
 
-def test_launch_publishes_terminal_and_only_unblocks_after_analysis(remote):
-    remote.approve()
-    observed = []
-
-    def workload(args):
-        with Ledger() as ledger:
-            _, state = ledger.refresh()
-        observed.append((args, slot(state, ID)["state"]))
-        return 0
-
-    assert launch.run_research("train.py", workload, ["--research-id", ID, *ARGS]) == 0
-    assert observed == [(ARGS, "RUNNING")]
-    assert launch.run_research("train.py", workload, ["--research-id", ID, *ARGS]) == 1
-    remote.sync()
-    assert remote.rows[-1]["state"] == "COMPLETED"
-    candidate = remote.rows[-1]
-    with Ledger() as ledger:
-        head, _ = ledger.refresh()
-        with pytest.raises(ProtocolError, match="Publish the outcome"):
-            ledger.verify_publication(head, candidate)
-    remote.analyse_and_publish()
-    remote.approve("DRP-0002")
-    assert launch.run_research("train.py", workload, ["--research-id", "DRP-0002", *ARGS]) == 0
+def test_valid_external_adapter_and_published_prerequisite(fixture, tmp_path):
+    fixture.approve()
+    assert fixture.invoke() == 0
+    fixture.sync()
+    terminal = fixture.rows[-1]
+    assert terminal["state"] == "COMPLETED" and protocol.valid_completion(terminal)
+    with pytest.raises(ProtocolError, match="not APPROVED"):
+        fixture.invoke()
+    fixture.publish_result()
+    fixture.approve("DRP-0002")
+    fixture.workspace = tmp_path / "fresh"
+    fixture.workspace.mkdir()
+    assert fixture.invoke("DRP-0002") == 0
 
 
-@pytest.mark.parametrize("mismatch", ["argv", "script", "input", "dirty", "plan", "absent", "offline"])
-def test_mismatches_and_outage_never_call_workload(remote, mismatch, monkeypatch):
-    if mismatch != "absent":
-        remote.approve()
-    if mismatch == "dirty":
-        remote.put("config.yaml", "changed", remote.local)
-    if mismatch == "input":
-        remote.put("config.yaml", "changed", remote.local)
-        implementation = remote.commit("changed input", remote.local)
-        remote.plan["implementation_commit"] = implementation
-        # Make the source match a new documented plan, leaving the old file digest.
-        remote.rows[-1]["state"] = "DOCUMENTED"
-        remote.put(protocol.plan_path(ID), remote.plan)
-        pinned = remote.publish("repin plan")
-        remote.rows[-1].update(state="APPROVED", plan_commit=pinned)
-        remote.publish("approve again")
-    if mismatch == "plan":
-        remote.put(protocol.plan_path(ID), {**remote.plan, "question": "edited after approval"})
-        remote.publish("edit the approved plan")
-    if mismatch == "offline":
-        monkeypatch.setattr(protocol, "RESEARCH_URL", str(remote.remote / "missing"))
-    script = "generate.py" if mismatch == "script" else "train.py"
-    args = [*ARGS, "--resume"] if mismatch == "argv" else ARGS
-    result = launch.run_research(script, lambda _: pytest.fail("workload started"),
-                                 ["--research-id", ID, *args])
-    assert result == 1
-    assert not (remote.local / ".git/domovoi-protocol").exists()
+@pytest.mark.parametrize("file", ["surprise.py", "cache/ignored.py", "working-copy.pyc"])
+def test_untracked_source_even_ignored_is_rejected(fixture, file):
+    fixture.approve()
+    fixture.put(fixture.source, file, "raise RuntimeError('must not be imported')")
+    with pytest.raises(ValueError, match="Unexpected source"):
+        fixture.invoke()
+    fixture.sync()
+    assert fixture.rows[-1]["state"] == "APPROVED"
 
 
-def test_two_clones_cannot_claim_the_same_remote_parent(remote):
-    remote.approve()
+def test_bootstrap_refuses_untracked_module_before_inserting_source(tmp_path):
+    git(tmp_path, "init", "--quiet")
+    git(tmp_path, "config", "core.autocrlf", "false")
+    path = tmp_path / "scripts/experiment_protocol.py"
+    path.parent.mkdir()
+    path.write_bytes((ROOT / "scripts/experiment_protocol.py").read_bytes())
+    Fixtures.commit(tmp_path, "bootstrap fixture")
+    (tmp_path / "scripts/os.py").write_text("raise RuntimeError('untracked import')", encoding="utf-8")
+    result = subprocess.run([sys.executable, "-I", "-S", "-B", str(path), "status"],
+                            capture_output=True, timeout=30)
+    assert result.returncode and b"Unexpected source file" in result.stderr
+    assert b"untracked import" not in result.stderr
+
+
+def test_isolated_bootstrap_and_spawned_campaign_worker(fixture):
+    # Use the real isolated CLI and handoff with a fixture-only ledger and no trainer.
+    for path in ("scripts/__init__.py", "scripts/experiment_protocol.py", "domovoi/__init__.py",
+                 "domovoi/experiments/__init__.py", "domovoi/experiments/launch.py",
+                 "domovoi/experiments/runtime.py", "domovoi/experiments/protocol.py"):
+        payload = (ROOT / path).read_text(encoding="utf-8")
+        if path.endswith("/protocol.py"):
+            payload = payload.replace(f"RESEARCH_URL = {json.dumps('https://github.com/CL-BAF/Domovoi-research.git')}",
+                                      f"RESEARCH_URL = {str(fixture.remote)!r}")
+            payload += "\n\ndef published_implementation(commit):\n    pass\n"
+        fixture.put(fixture.source, path, payload)
+    fixture.put(fixture.source, "scripts/run_pilot.py",
+                "from domovoi.experiments.launch import start_training_child\n"
+                "def _run(argv):\n    return start_training_child(argv).wait(timeout=35)\n")
+    fixture.put(fixture.source, "scripts/train.py", WRITE.replace("def main", "def _run"))
+    fixture.source_sha = fixture.commit(fixture.source, "isolated subprocess fixture")
+    fixture.plan.update(implementation_commit=fixture.source_sha,
+                        command={"script": "scripts/run_pilot.py", "argv": ["--fixture"]})
+    fixture.pin_inputs()
+    fixture.approve()
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", str(fixture.source / "scripts/experiment_protocol.py"),
+         "run", ID, "--workspace", str(fixture.workspace), "--dependencies", str(fixture.deps)],
+        env=dict(os.environ), capture_output=True, text=True, timeout=65,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    fixture.sync()
+    assert protocol.valid_completion(fixture.rows[-1])
+    assert (fixture.workspace / "out/receipt.json").read_text() == "fixture output"
+
+
+def test_source_blob_check_ignores_git_assume_unchanged(fixture):
+    git(fixture.source, "update-index", "--assume-unchanged", SCRIPT)
+    fixture.put(fixture.source, SCRIPT, "unexpected payload")
+    with pytest.raises(ValueError, match="differs from its Git blob"):
+        verify_checkout(fixture.source)
+
+
+@pytest.mark.parametrize("mutation", ["dependency", "extra_dependency", "workspace", "metric", "offline"])
+def test_drift_or_outage_does_not_claim(fixture, mutation, monkeypatch):
+    if mutation == "metric":
+        fixture.plan["execution"]["analysis"].pop("primary_metric")
+    fixture.approve()
+    if mutation == "dependency":
+        fixture.put(fixture.deps, "fixture_dependency.py", "value = 2\n")
+    if mutation == "extra_dependency":
+        fixture.put(fixture.deps, "shadow.py", "value = 2\n")
+    if mutation == "workspace":
+        fixture.put(fixture.workspace, "unreviewed.txt", "mutable evidence")
+    if mutation == "offline":
+        monkeypatch.setattr(protocol, "RESEARCH_URL", str(fixture.remote / "missing"))
+    with pytest.raises(ProtocolError):
+        fixture.invoke()
+    assert not (fixture.source / ".git/domovoi-protocol").exists()
+
+
+@pytest.mark.parametrize("action", [
+    "Path('../secret.txt').read_text()", "Path('unapproved').write_text('x')",
+    "__import__('subprocess').run(['unapproved'])",
+    "with __import__('concurrent.futures', fromlist=['ThreadPoolExecutor']).ThreadPoolExecutor() as pool:"
+    "\n        pool.submit(Path('unknown.txt').read_bytes).result()",
+])
+def test_approved_adapter_has_bounded_python_io(fixture, action):
+    fixture.put(fixture.source, SCRIPT, "from pathlib import Path\ndef main(argv):\n    " +
+                action + "\n    return 0\n")
+    fixture.source_sha = fixture.commit(fixture.source, "locked fixture workload")
+    fixture.plan["implementation_commit"] = fixture.source_sha
+    fixture.pin_inputs()
+    fixture.approve()
+    with pytest.raises(ProtocolError, match="refused|locked tool"):
+        fixture.invoke()
+    fixture.sync()
+    assert fixture.rows[-1]["state"] == "FAILED"
+
+
+def test_successful_return_requires_declared_output_receipt(fixture):
+    fixture.put(fixture.source, SCRIPT, "def main(argv):\n    return 0\n")
+    fixture.source_sha = fixture.commit(fixture.source, "empty callback")
+    fixture.plan["implementation_commit"] = fixture.source_sha
+    fixture.pin_inputs()
+    fixture.approve()
+    with pytest.raises(ProtocolError, match="Missing or unsafe completion evidence"):
+        fixture.invoke()
+    fixture.sync()
+    assert fixture.rows[-1]["state"] == "FAILED"
+
+
+def test_two_fast_forward_claims_of_same_parent_cannot_both_win(fixture):
+    fixture.approve()
     with Ledger() as first, Ledger() as second:
         snapshots = [ledger.refresh() for ledger in (first, second)]
 
-        def claim(ledger, snapshot, token):
-            parent, state = snapshot
-            slot(state, ID).update(state="RUNNING", claim_sha256=token)
+        def claim(ledger, snapshot, value):
+            head, state = snapshot
+            slot(state, ID).update(state="RUNNING", claim_sha256=value)
             try:
-                ledger.advance(parent, state, "concurrent claim")
+                ledger.advance(head, state, "concurrent fixture claim")
             except ProtocolError:
                 return False
             return True
 
         with ThreadPoolExecutor(2) as pool:
             attempts = [pool.submit(claim, ledger, snap, str(i) * 64)
-                        for i, (ledger, snap) in enumerate(zip((first, second), snapshots), 1)]
-        assert sorted(attempt.result() for attempt in attempts) == [False, True]
+                        for i, (ledger, snap) in enumerate(zip((first, second), snapshots))]
+            assert sorted(a.result() for a in attempts) == [False, True]
 
 
-@pytest.mark.parametrize("pending", [False, True])
-def test_crash_recovery_closes_only_owned_inactive_claim(remote, pending):
-    remote.approve()
-    directory = launch.receipt_directory(ID)
-    directory.mkdir(parents=True)
-    receipt = launch.Receipt(ID, directory, "test recovery token", "train.py")
-    launch.write_local(directory / "claim.json", {"token": receipt.token, "script": receipt.script})
-    if pending:
-        launch.write_local(directory / "outcome.json",
-                           {"state": "FAILED", "execution_note": "saved before network failure"})
+@pytest.mark.parametrize("malformed", [False, True])
+def test_local_recovery_cannot_forge_success_or_overwrite_evidence(fixture, malformed):
+    fixture.approve()
+    receipt = fixture.manual_claim()
+    pending = receipt.directory / "outcome.json"
+    data = {"state": "COMPLETED", "execution_note": "made-up record", "exit_code": 0}
+    if malformed:
+        data["claim_sha256"] = "9" * 64
+    launch.write_local(pending, data)
+    original = pending.read_bytes()
+    if malformed:
+        with pytest.raises(ProtocolError, match="Malformed local outcome"):
+            launch.recover(ID, "evidence missing")
+    else:
+        with launch.local_lock(receipt.directory / "worker.lock"):
+            with pytest.raises(ProtocolError, match="still active"):
+                launch.recover(ID, "evidence missing")
+        launch.recover(ID, "evidence missing")
+    fixture.sync()
+    assert fixture.rows[-1]["state"] == ("RUNNING" if malformed else "INTERRUPTED")
+    assert pending.read_bytes() == original
+
+
+def test_network_failure_preserves_local_success_but_manual_close_is_interrupted(fixture, monkeypatch):
+    fixture.approve()
+    advance = Ledger.advance
+
+    def unavailable(self, head, state, note):
+        if note.startswith("Record"):
+            raise ProtocolError("test network failure")
+        return advance(self, head, state, note)
+
+    with monkeypatch.context() as network:
+        network.setattr(Ledger, "advance", unavailable)
+        with pytest.raises(ProtocolError, match="test network failure"):
+            fixture.invoke()
+    pending = launch.receipt_directory(ID) / "outcome.json"
+    original = pending.read_bytes()
+    assert json.loads(original)["state"] == "COMPLETED"
+    assert "completion_token" not in json.loads(original)
+    launch.recover(ID, "terminal push failed")
+    fixture.sync()
+    assert fixture.rows[-1]["state"] == "INTERRUPTED"
+    assert pending.read_bytes() == original
+
+
+def test_handwritten_remote_completion_is_refused_by_history_verifier(fixture):
+    fixture.approve()
+    fixture.manual_claim()
+    fixture.sync()
+    fixture.rows[-1].update(state="COMPLETED", exit_code=0, completion_token="b" * 64,
+                           execution_evidence={"out/receipt.json": "1" * 64})
+    fixture.publish("fabricated result")
     with Ledger() as ledger:
-        head, state = ledger.refresh()
-        slot(state, ID).update(state="RUNNING", claim_sha256=receipt.digest)
-        ledger.advance(head, state, "claim before simulated crash")
-    with launch.local_lock(directory / "worker.lock"):
-        with pytest.raises(ProtocolError, match="still active"):
-            launch.recover(ID, "record this crash")
-    launch.recover(ID, "record this crash")
-    remote.sync()
-    assert remote.rows[-1]["state"] == ("FAILED" if pending else "INTERRUPTED")
-
-
-def test_worker_requires_active_remote_claim_and_consumes_handoff(remote, monkeypatch):
-    remote.approve()
-    directory = launch.receipt_directory(ID)
-    directory.mkdir(parents=True)
-    receipt = launch.Receipt(ID, directory, "parent token", "run_pilot.py")
-    launch.write_local(directory / "claim.json", {"token": receipt.token, "script": receipt.script})
-    key = "0" * 64
-    launch.write_local(directory / "handoff.json", {"argv": ARGS})
-    args = ["--research-worker", ID, *ARGS]
-    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
-    assert launch.run_research("train.py", lambda _: pytest.fail("unclaimed worker"), args) == 1
-    with Ledger() as ledger:
-        head, state = ledger.refresh()
-        slot(state, ID).update(state="RUNNING", claim_sha256=receipt.digest,
-                               worker_sha256=hashlib.sha256(key.encode()).hexdigest())
-        ledger.advance(head, state, "claim parent")
-    monkeypatch.setattr(sys, "stdin", io.StringIO("1" * 64 + "\n"))
-    assert launch.run_research("train.py", lambda _: pytest.fail("wrong credential"), args) == 1
-    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
-    assert launch.run_research("train.py", lambda a: 0 if a == ARGS else 1, args) == 0
-    assert launch.run_research("train.py", lambda _: pytest.fail("worker replay"), args) == 1
-
-
-def test_spawned_campaign_worker_accepts_only_its_parent_handoff(remote):
-    source = Path(__file__).resolve().parents[1]
-    remote.put("scripts/train.py", f"""import sys
-from pathlib import Path
-sys.path.insert(0, {str(source)!r})
-from domovoi.experiments import launch, protocol
-launch.ROOT = Path({str(remote.local)!r})
-protocol.RESEARCH_URL = {str(remote.remote)!r}
-def work(argv):
-    print('verified worker ' + ' '.join(argv))
-    return 0
-raise SystemExit(launch.run_research('train.py', work))
-""", remote.local)
-    remote.plan["command"] = {"script": "scripts/real_data_campaign.py", "argv": []}
-    remote.approve()
-
-    def campaign(_):
-        child = launch.start_training_child(ARGS, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        output, _ = child.communicate(timeout=20)
-        assert child.returncode == 0, output
-        assert b"verified worker --config config.yaml" in output
-        return 0
-
-    assert launch.run_research("real_data_campaign.py", campaign, ["--research-id", ID]) == 0
-
-
-def test_lifecycle_history_catches_removed_run(remote):
-    remote.approve()
-    remote.rows = []
-    head = remote.publish("silently remove the approved run")
-    with Ledger() as ledger:
-        ledger.refresh()
-        with pytest.raises(ProtocolError, match="cannot delete"):
+        head, _ = ledger.refresh()
+        with pytest.raises(ProtocolError, match="original execution proof"):
             ledger.verify_history(head)
 
 
-def test_outage_after_launch_saves_pending_result_and_recovery_publishes_it(remote, monkeypatch):
-    remote.approve()
-    valid_url = protocol.RESEARCH_URL
+def test_posthoc_metric_pin_is_refused(fixture):
+    fixture.approve()
+    assert fixture.invoke() == 0
+    fixture.publish_result(changed_metric=True)
+    fixture.approve("DRP-0002")
+    with pytest.raises(ProtocolError, match="original approved source pins"):
+        fixture.invoke("DRP-0002")
 
-    def disconnect(_):
-        monkeypatch.setattr(protocol, "RESEARCH_URL", str(remote.remote / "offline"))
-        return 0
 
-    assert launch.run_research("train.py", disconnect, ["--research-id", ID, *ARGS]) == 1
-    pending = launch.receipt_directory(ID) / "outcome.json"
-    assert json.loads(pending.read_bytes())["state"] == "COMPLETED"
-    monkeypatch.setattr(protocol, "RESEARCH_URL", valid_url)
-    remote.sync()
-    assert remote.rows[-1]["state"] == "RUNNING"
-    launch.recover(ID, "publish stored outcome")
-    remote.sync()
-    assert remote.rows[-1]["state"] == "COMPLETED"
+def test_worker_handoff_uses_active_claim_and_is_single_use(fixture, monkeypatch):
+    fixture.put(fixture.source, "scripts/run_pilot.py", "def _run(argv): return 0\n")
+    fixture.put(fixture.source, "scripts/train.py", WRITE.replace("main(argv)", "_run(argv)"))
+    fixture.source_sha = fixture.commit(fixture.source, "worker source")
+    fixture.plan.update(command={"script": "scripts/run_pilot.py", "argv": []},
+                        implementation_commit=fixture.source_sha)
+    fixture.pin_inputs()
+    fixture.approve()
+    key = "1" * 64
+    receipt = fixture.manual_claim(script="run_pilot.py", key=key)
+    handoff = receipt.directory / "handoff.json"
+    launch.write_local(handoff, {"argv": []})
+    monkeypatch.setattr(sys, "stdin", io.StringIO("2" * 64 + "\n"))
+    with pytest.raises(ProtocolError, match="credential"):
+        launch.run_worker(ID, fixture.source_sha, fixture.workspace, fixture.deps, [])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\n"))
+    assert launch.run_worker(ID, fixture.source_sha, fixture.workspace, fixture.deps, []) == 0
+    assert not handoff.exists()
+    with pytest.raises(ProtocolError, match="one-use"):
+        launch.run_worker(ID, fixture.source_sha, fixture.workspace, fixture.deps, [])

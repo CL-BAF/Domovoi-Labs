@@ -13,6 +13,9 @@ Usage:
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    raise SystemExit("Use python -I -S -B scripts/experiment_protocol.py run for research.")
+
 import argparse
 import json
 import sys
@@ -67,6 +70,7 @@ def _run(argv: list[str]) -> int:
     ap.add_argument("--depth", type=int, default=None, help="recurrence_depth")
     ap.add_argument("--order", default=None, help="recurrence_order: cycle | sequence")
     ap.add_argument("--smoke", action="store_true", help="run the cached-vs-uncached check")
+    ap.add_argument("--out", type=Path, help="save the report to a declared output file")
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -87,9 +91,9 @@ def _run(argv: list[str]) -> int:
     }
     if args.smoke:
         report["offline_cache_smoke"] = cache_smoke(model)
-    print(json.dumps(report, indent=2))
+    report_json = json.dumps(report, indent=2)
+    if args.out is not None:
+        with args.out.open("x", encoding="utf-8") as f:
+            f.write(report_json + "\n")
+    print(report_json)
     return 0 if not args.smoke or report["offline_cache_smoke"]["match_atol_1e-4"] else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

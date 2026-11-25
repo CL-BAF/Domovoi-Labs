@@ -10,6 +10,9 @@ Writes machine-readable results to experiments/<ID>/evals.json.
 
 from __future__ import annotations
 
+if __name__ == "__main__":
+    raise SystemExit("Use python -I -S -B scripts/experiment_protocol.py run for research.")
+
 import argparse
 import json
 import sys
@@ -45,6 +48,7 @@ def _run(argv: list[str]) -> int:
                          "training-time validation)")
     ap.add_argument("--checkpoint-step", type=int,
                     help="evaluate this saved step instead of the latest checkpoint")
+    ap.add_argument("--out", type=Path, help="write results separately from the read-only input run")
     args = ap.parse_args(argv)
 
     meta = load_metadata(args.experiment)
@@ -55,7 +59,7 @@ def _run(argv: list[str]) -> int:
     root = exp_dir / "checkpoints"
     if args.checkpoint_step is not None:
         ckpt_dir = root / f"step_{args.checkpoint_step:08d}"
-    elif full_split:
+    elif full_split or args.out is not None:
         latest = scan_checkpoints(root)["latest"]
         ckpt_dir = latest.read_from if latest is not None else None
     else:
@@ -107,7 +111,11 @@ def _run(argv: list[str]) -> int:
         "limit": args.limit,
         "val_batches": args.val_batches,
     })
-    if full_split:
+    if args.out is not None:
+        out = args.out
+        with out.open("x", encoding="utf-8") as f:
+            json.dump(results, f, indent=2, allow_nan=False)
+    elif full_split:
         name = "-".join(tasks)
         out = exp_dir / f"evals-step-{ckpt_meta['step']:08d}-{name}.json"
         with out.open("x", encoding="utf-8") as f:
@@ -118,7 +126,3 @@ def _run(argv: list[str]) -> int:
         update_metadata(exp_dir, {"evals_file": str(out)})
     print(f"[eval] results written to {out}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
